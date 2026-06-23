@@ -1,106 +1,106 @@
 import os
 import logging
 import re
-import asyncio
+import math
+import requests
+from io import BytesIO
 from flask import Flask
 from threading import Thread
-from telegram import Update
+from PIL import Image, ImageDraw, ImageFont
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Logging setup
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Aap ke naye bot ki details
 BOT_TOKEN = "8585014628:AAHrW6o4dlKHfkoIFHVfKzWsM0a24fCk4s0"
 TARGET_ADMIN_ID = 7323039280  
 
-# ===== DUMMY WEB SERVER =====
+# Data temporary store karne ke liye
+user_images = {}
+
+# ===== DUMMY SERVER =====
 flask_app = Flask(__name__)
-
 @flask_app.route('/')
-def home():
-    return "X PFP Scraper Bot is Alive and Running!"
+def home(): return "Collage Bot Alive!"
+def run_flask(): flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+Thread(target=run_flask, daemon=True).start()
 
-def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    flask_app.run(host='0.0.0.0', port=port)
+# --- COLLAGE ENGINE ---
+def create_collage(image_list, text_watermark="Creators Club"):
+    images = []
+    for img_data in image_list:
+        try:
+            if isinstance(img_data, str): # Agar URL hai
+                response = requests.get(img_data, timeout=5)
+                img = Image.open(BytesIO(response.content)).convert("RGBA")
+            else: # Agar direct image file hai
+                img = Image.open(BytesIO(img_data)).convert("RGBA")
+            
+            img = img.resize((150, 150))
+            images.append(img)
+        except: continue
 
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.start()
-# ============================
+    if not images: return None
+    cols = math.ceil(math.sqrt(len(images)))
+    rows = math.ceil(len(images) / cols)
+    collage = Image.new('RGBA', (cols * 150, rows * 150), (0, 0, 0, 255))
 
-# 1. Start Command
+    for idx, img in enumerate(images):
+        collage.paste(img, ((idx % cols) * 150, (idx // cols) * 150))
+
+    # Watermark
+    draw = ImageDraw.Draw(collage)
+    font = ImageFont.load_default(size=40)
+    w, h = collage.size
+    draw.text((w/2 - 100, h/2 - 20), text_watermark, font=font, fill="white")
+    
+    output = BytesIO()
+    collage.convert("RGB").save(output, format='JPEG')
+    output.seek(0)
+    return output
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != TARGET_ADMIN_ID: return
-    await update.message.reply_text(
-        "🚀 **X PFP Scraper Ready (Strict Links Only)!**\n\n"
-        "Aap ek sath jitne marzi Twitter/X ke **LINKS** paste kar ke bhej dein. "
-        "Bot sirf proper links (x.com ya twitter.com) ko detect karega. Usernames (@) ya normal text ko ignore kar diya jayega."
-    )
+    user_images[TARGET_ADMIN_ID] = []
+    kb = [[KeyboardButton("🖼️ New Collage")], [KeyboardButton("✅ Make Collage Now"), KeyboardButton("🗑️ Clear List")]]
+    await update.message.reply_text("👋 Bot Ready! Links bhejein ya Photos upload karein.", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True, persistent=True))
 
-# 2. Bulk Processing Logic
-async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != TARGET_ADMIN_ID: return
+async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != TARGET_ADMIN_ID: return
 
-    raw_text = update.message.text
-    if not raw_text: return
-
-    # Text ko split karna space ya newline se
-    raw_items = re.split(r'[\s,\n]+', raw_text)
-    items = [item.strip() for item in raw_items if item.strip()]
-
-    if not items: return
-
-    # STRICT FILTER: Sirf un items ko rukhna jin me x.com/ ya twitter.com/ aata ho
-    # Is se @usernames khud ba khud block ho jayenge kyunke un me link nahi hota
-    valid_links = [item for item in items if "x.com/" in item.lower() or "twitter.com/" in item.lower()]
+    # Agar button dabaya hai
+    text = update.message.text
+    if text == "🖼️ New Collage": user_images[user_id] = []; await update.message.reply_text("✨ List Khali! Ab bhejain."); return
+    if text == "🗑️ Clear List": user_images[user_id] = []; await update.message.reply_text("🗑️ Done."); return
     
-    if not valid_links:
+    if text == "✅ Make Collage Now":
+        if not user_images.get(user_id): await update.message.reply_text("❌ List Khali hai!"); return
+        await update.message.reply_text("🎨 Collage ban raha hai...")
+        img = create_collage(user_images[user_id])
+        if img: await context.bot.send_photo(chat_id=user_id, photo=img, caption="🎉 Aap ka Collage!"); user_images[user_id] = [] # Auto-Delete Data
+        else: await update.message.reply_text("❌ Error!"); user_images[user_id] = []
         return
 
-    status_msg = await update.message.reply_text(f"⏳ Total {len(valid_links)} valid links mile hain. Processing shuru ho rahi hai...")
+    # Agar Photo bheji hai
+    if update.message.photo:
+        photo_file = await update.message.photo[-1].get_file()
+        img_bytes = BytesIO()
+        await photo_file.download_to_memory(img_bytes)
+        user_images.setdefault(user_id, []).append(img_bytes.getvalue())
+        await update.message.reply_text(f"📸 Image add hui! Total: {len(user_images[user_id])}")
 
-    success_count = 0
-    fail_count = 0
-
-    for item in valid_links:
-        x_username = None
-        
-        try:
-            # Link ke aakhri hissay se username nikalna
-            x_username = item.rstrip('/').split('/')[-1].split('?')[0]
-        except:
-            continue
-
-        if not x_username:
-            fail_count += 1
-            continue
-
-        avatar_url = f"https://unavatar.io/x/{x_username}"
-        caption_text = f"👤 **Username:** @{x_username}\n🔗 **Link:** https://x.com/{x_username}"
-
-        try:
-            await context.bot.send_photo(chat_id=TARGET_ADMIN_ID, photo=avatar_url, caption=caption_text)
-            success_count += 1
-        except Exception as e:
-            logging.warning(f"Failed to fetch for {x_username}: {e}")
-            try:
-                await context.bot.send_message(chat_id=TARGET_ADMIN_ID, text=f"❌ **Failed to fetch PFP for:** @{x_username}\n🔗 Link: {item}")
-            except: pass
-            fail_count += 1
-
-        # Telegram rate limit se bachne ke liye 1 second ka pause
-        await asyncio.sleep(1)
-
-    await status_msg.reply_text(f"✅ **Kaam Mukammal!**\n\n📥 Success: {success_count}\n❌ Failed: {fail_count}")
+    # Agar Link bheja hai
+    elif text:
+        links = re.findall(r'(https?://\S+)', text)
+        for link in links:
+            if "x.com" in link or "twitter.com" in link:
+                username = link.rstrip('/').split('/')[-1]
+                user_images.setdefault(user_id, []).append(f"https://unavatar.io/x/{username}")
+        await update.message.reply_text(f"🔗 Links processed! Total: {len(user_images[user_id])}")
 
 if __name__ == '__main__':
-    keep_alive()
-    
     bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_pfp_requests))
-    
-    print("Scraper Bot is running strictly for links...")
+    bot_app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_input))
     bot_app.run_polling()
