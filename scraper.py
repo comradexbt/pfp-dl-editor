@@ -196,9 +196,7 @@ async def handle_everything(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await asyncio.sleep(1)
 
-if __name__ == '__main__':
-    Thread(target=run_flask, daemon=True).start()
-    bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
-    bot_app.add_handler(MessageHandler(filters.ALL, handle_everything))
-    print("Dual Mode Bot with Dynamic Keyboards is running...")
-    bot_app.run_polling()
+if __name__ == "__main__":
+    print("Bot is starting...")
+    # Polling ko thoda stable banane ke liye parameters
+    bot.polling(none_stop=True, interval=0, timeout=20)
