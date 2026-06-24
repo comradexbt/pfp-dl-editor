@@ -30,54 +30,37 @@ def keep_alive():
     t.start()
 # ============================
 
-# 1. Start Command
+# 1. Start Command (Simple ho gayi)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != TARGET_ADMIN_ID: return
-    await update.message.reply_text(
-        "🚀 **X PFP Scraper Ready (Strict Links Only)!**\n\n"
-        "Aap ek sath jitne marzi Twitter/X ke **LINKS** paste kar ke bhej dein. "
-        "Bot sirf proper links (x.com ya twitter.com) ko detect karega. Usernames (@) ya normal text ko ignore kar diya jayega."
-    )
+    await update.message.reply_text("👋 Send X profile link to download PFP.")
 
-# 2. Bulk Processing Logic
+# 2. Bulk Processing & Forwarded Message Logic
 async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != TARGET_ADMIN_ID: return
 
-    raw_text = update.message.text
+    # text ya caption dono check karega (forwarded messages / photos with text ke liye)
+    raw_text = update.message.text or update.message.caption
     if not raw_text: return
 
-    # Text ko split karna space ya newline se
-    raw_items = re.split(r'[\s,\n]+', raw_text)
-    items = [item.strip() for item in raw_items if item.strip()]
-
-    if not items: return
-
-    # STRICT FILTER: Sirf un items ko rukhna jin me x.com/ ya twitter.com/ aata ho
-    # Is se @usernames khud ba khud block ho jayenge kyunke un me link nahi hota
-    valid_links = [item for item in items if "x.com/" in item.lower() or "twitter.com/" in item.lower()]
+    # SMART REGEX: Yeh poore text mein se automatically sirf X/Twitter ke usernames extract karega
+    # Chahe aap lamba forward message bhejein, yeh sirf link dhoondega
+    usernames_found = re.findall(r'https?://(?:www\.)?(?:x|twitter)\.com/([a-zA-Z0-9_]+)', raw_text)
     
-    if not valid_links:
+    # Ek link agar 2 baar aa gaya ho toh usay filter karna
+    unique_usernames = list(set(usernames_found))
+
+    if not unique_usernames: 
         return
 
-    status_msg = await update.message.reply_text(f"⏳ Total {len(valid_links)} valid links mile hain. Processing shuru ho rahi hai...")
+    status_msg = await update.message.reply_text(f"⏳ Extracting {len(unique_usernames)} profile(s) in High Quality...")
 
     success_count = 0
     fail_count = 0
 
-    for item in valid_links:
-        x_username = None
-        
-        try:
-            # Link ke aakhri hissay se username nikalna
-            x_username = item.rstrip('/').split('/')[-1].split('?')[0]
-        except:
-            continue
-
-        if not x_username:
-            fail_count += 1
-            continue
-
-        avatar_url = f"https://unavatar.io/x/{x_username}"
+    for x_username in unique_usernames:
+        # High Quality ke liye size=1000 add kiya hai
+        avatar_url = f"https://unavatar.io/x/{x_username}?size=1000"
         caption_text = f"👤 **Username:** @{x_username}\n🔗 **Link:** https://x.com/{x_username}"
 
         try:
@@ -86,21 +69,28 @@ async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logging.warning(f"Failed to fetch for {x_username}: {e}")
             try:
-                await context.bot.send_message(chat_id=TARGET_ADMIN_ID, text=f"❌ **Failed to fetch PFP for:** @{x_username}\n🔗 Link: {item}")
+                await context.bot.send_message(chat_id=TARGET_ADMIN_ID, text=f"❌ **Failed to fetch PFP for:** @{x_username}")
             except: pass
             fail_count += 1
 
         # Telegram rate limit se bachne ke liye 1 second ka pause
         await asyncio.sleep(1)
 
-    await status_msg.reply_text(f"✅ **Kaam Mukammal!**\n\n📥 Success: {success_count}\n❌ Failed: {fail_count}")
+    # Agar sirf 1 link tha, toh extra "Done" msg bhejne ki zaroorat nahi
+    if len(unique_usernames) > 1:
+        await status_msg.reply_text(f"✅ **Done!**\n\n📥 Success: {success_count}\n❌ Failed: {fail_count}")
+    else:
+        # 1 link tha, toh bas loading message delete kar do taake chat clean rahay
+        await status_msg.delete()
 
 if __name__ == '__main__':
     keep_alive()
     
     bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_pfp_requests))
     
-    print("Scraper Bot is running strictly for links...")
+    # filters.CAPTION is liye lagaya taake image ke sath forward kiye gaye text ko bhi parh le
+    bot_app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, process_pfp_requests))
+    
+    print("Scraper Bot is running smoothly...")
     bot_app.run_polling()
