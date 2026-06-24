@@ -33,8 +33,7 @@ def keep_alive():
 # 1. Start Command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != TARGET_ADMIN_ID: return
-    # Message update kar diya gaya hai taake @username ka bhi zikar ho
-    await update.message.reply_text("👋 Send X profile link or @username to download PFP.")
+    await update.message.reply_text("👋 Send X profile link, @username, or just the name to download PFP.")
 
 # 2. Bulk Processing & Forwarded Message Logic
 async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -44,12 +43,19 @@ async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYP
     raw_text = update.message.text or update.message.caption
     if not raw_text: return
 
-    # SMART REGEX (Ab yeh Links aur @usernames dono ko pakrega)
-    usernames_from_links = re.findall(r'https?://(?:www\.)?(?:x|twitter)\.com/([a-zA-Z0-9_]+)', raw_text)
-    usernames_from_mentions = re.findall(r'@([a-zA-Z0-9_]+)', raw_text)
+    usernames_found = []
     
-    # Dono lists ko mila diya
-    usernames_found = usernames_from_links + usernames_from_mentions
+    # SMART EXTRACTION (Links, @Mentions, or Plain Names)
+    for word in raw_text.split():
+        # Check if it's an X/Twitter URL
+        link_match = re.search(r'https?://(?:www\.)?(?:x|twitter)\.com/([a-zA-Z0-9_]+)', word)
+        if link_match:
+            usernames_found.append(link_match.group(1))
+        else:
+            # Clean the word (removes @, commas, spaces, etc.) and treats as exact handle
+            clean_name = re.sub(r'[^a-zA-Z0-9_]', '', word)
+            if clean_name:
+                usernames_found.append(clean_name)
     
     unique_usernames = list(set(usernames_found))
 
