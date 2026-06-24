@@ -30,7 +30,7 @@ def keep_alive():
     t.start()
 # ============================
 
-# 1. Start Command (Simple ho gayi)
+# 1. Start Command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != TARGET_ADMIN_ID: return
     await update.message.reply_text("👋 Send X profile link to download PFP.")
@@ -39,15 +39,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != TARGET_ADMIN_ID: return
 
-    # text ya caption dono check karega (forwarded messages / photos with text ke liye)
+    # text ya caption dono check karega
     raw_text = update.message.text or update.message.caption
     if not raw_text: return
 
-    # SMART REGEX: Yeh poore text mein se automatically sirf X/Twitter ke usernames extract karega
-    # Chahe aap lamba forward message bhejein, yeh sirf link dhoondega
+    # SMART REGEX
     usernames_found = re.findall(r'https?://(?:www\.)?(?:x|twitter)\.com/([a-zA-Z0-9_]+)', raw_text)
     
-    # Ek link agar 2 baar aa gaya ho toh usay filter karna
     unique_usernames = list(set(usernames_found))
 
     if not unique_usernames: 
@@ -59,12 +57,11 @@ async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYP
     fail_count = 0
 
     for x_username in unique_usernames:
-        # High Quality ke liye size=1000 add kiya hai
         avatar_url = f"https://unavatar.io/x/{x_username}?size=1000"
-        caption_text = f"👤 **Username:** @{x_username}\n🔗 **Link:** https://x.com/{x_username}"
 
         try:
-            await context.bot.send_photo(chat_id=TARGET_ADMIN_ID, photo=avatar_url, caption=caption_text)
+            # Yahan se caption hata diya gaya hai, ab sirf picture aayegi
+            await context.bot.send_photo(chat_id=TARGET_ADMIN_ID, photo=avatar_url)
             success_count += 1
         except Exception as e:
             logging.warning(f"Failed to fetch for {x_username}: {e}")
@@ -76,11 +73,9 @@ async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYP
         # Telegram rate limit se bachne ke liye 1 second ka pause
         await asyncio.sleep(1)
 
-    # Agar sirf 1 link tha, toh extra "Done" msg bhejne ki zaroorat nahi
     if len(unique_usernames) > 1:
         await status_msg.reply_text(f"✅ **Done!**\n\n📥 Success: {success_count}\n❌ Failed: {fail_count}")
     else:
-        # 1 link tha, toh bas loading message delete kar do taake chat clean rahay
         await status_msg.delete()
 
 if __name__ == '__main__':
@@ -89,7 +84,6 @@ if __name__ == '__main__':
     bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     
-    # filters.CAPTION is liye lagaya taake image ke sath forward kiye gaye text ko bhi parh le
     bot_app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, process_pfp_requests))
     
     print("Scraper Bot is running smoothly...")
