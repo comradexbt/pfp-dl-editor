@@ -36,7 +36,8 @@ MAX_COLLAGE_PHOTOS = 1000
 MIN_COLLAGE_PHOTOS = 2
 MAX_COLLAGE_SIDE = 4000
 
-STYLE_SELECT, BG_SELECT, TEXT_SELECT, COLLECTING = range(4)
+# Added SHAPE_SELECT to the conversation states
+STYLE_SELECT, SHAPE_SELECT, BG_SELECT, TEXT_SELECT, COLLECTING = range(5)
 
 STYLES = {
     "classic": {
@@ -71,7 +72,7 @@ STYLES = {
     },
     "labeled": {
         "title": "Labeled Grid",
-        "desc": "Rounded icons + text under each (like app grid)",
+        "desc": "Rounded icons + text under each",
         "kind": "labeled",
         "gap": 28,
         "pad": 48,
@@ -84,7 +85,7 @@ STYLES = {
     },
     "glide": {
         "title": "Glide Gallery",
-        "desc": "Centered icons + sleek labels (modern glide style)",
+        "desc": "Centered icons + sleek labels",
         "kind": "glide",
         "gap": 24,
         "pad": 40,
@@ -283,7 +284,7 @@ def _session_dir(context: ContextTypes.DEFAULT_TYPE) -> Path:
 def _cleanup_session(context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data.pop("collage_dir", None)
     for k in (
-        "collage_count", "collage_style", "collage_labels", "collage_bg", 
+        "collage_count", "collage_style", "collage_shape", "collage_labels", "collage_bg", 
         "collage_text", "awaiting_custom_bg", "awaiting_custom_text",
     ):
         context.user_data.pop(k, None)
@@ -339,24 +340,52 @@ def _encode_jpeg(canvas: Image.Image) -> bytes:
         data = out.getvalue()
     return data
 
-def _build_plain_grid(image_paths, style_key) -> bytes:
+# New Helper for aspect ratios (Canvas Shapes)
+def _get_canvas_dims(content_w, content_h, pad, shape, min_h=0):
+    base_w = content_w + pad * 2
+    base_h = content_h + pad * 2
+    
+    if shape == "auto":
+        if min_h > base_h:
+            base_h = min_h
+        return base_w, base_h, (base_w - content_w) // 2, (base_h - content_h) // 2
+
+    target_ratio = 1.0
+    if shape == "portrait": target_ratio = 0.8     # 4:5 Aspect Ratio
+    elif shape == "landscape": target_ratio = 1.777  # 16:9 Aspect Ratio
+
+    current_ratio = base_w / base_h
+    if current_ratio < target_ratio:
+        # Needs to be wider
+        base_w = int(base_h * target_ratio)
+    elif current_ratio > target_ratio:
+        # Needs to be taller
+        base_h = int(base_w / target_ratio)
+        
+    return base_w, base_h, (base_w - content_w) // 2, (base_h - content_h) // 2
+
+
+def _build_plain_grid(image_paths, style_key, shape="auto") -> bytes:
     style = STYLES[style_key]
     n = len(image_paths)
     if n < MIN_COLLAGE_PHOTOS:
         raise RuntimeError(f"Need at least {MIN_COLLAGE_PHOTOS} photos")
     cols = math.ceil(math.sqrt(n))
     rows = math.ceil(n / cols)
-    gap = style["gap"]
-    pad = style["pad"]
+    gap, pad = style["gap"], style["pad"]
     border_w = style.get("border_w") or 0
     border_color = style.get("border")
+    
     overhead_w = pad * 2 + max(0, cols - 1) * gap + cols * 2 * border_w
-    overhead_h = pad * 2 + max(0, rows - 1) * gap + rows * 2 * border_w
     cell = max(24, (MAX_COLLAGE_SIDE - overhead_w) // cols)
     cell = min(cell, 256)
-    canvas_w = pad * 2 + cols * cell + max(0, cols - 1) * gap + cols * 2 * border_w
-    canvas_h = pad * 2 + rows * cell + max(0, rows - 1) * gap + rows * 2 * border_w
+    
+    content_w = cols * cell + max(0, cols - 1) * gap + cols * 2 * border_w
+    content_h = rows * cell + max(0, rows - 1) * gap + rows * 2 * border_w
+    
+    canvas_w, canvas_h, start_x, start_y = _get_canvas_dims(content_w, content_h, pad, shape)
     canvas = Image.new("RGB", (canvas_w, canvas_h), style["bg"])
+    
     for i, path in enumerate(image_paths):
         row, col = divmod(i, cols)
         try:
@@ -367,12 +396,13 @@ def _build_plain_grid(image_paths, style_key) -> bytes:
             tile = Image.new("RGB", (cell, cell), (40, 40, 40))
         if border_w and border_color:
             tile = ImageOps.expand(tile, border=border_w, fill=border_color)
-        x = pad + col * (cell + 2 * border_w + gap)
-        y = pad + row * (cell + 2 * border_w + gap)
+            
+        x = start_x + col * (cell + 2 * border_w + gap)
+        y = start_y + row * (cell + 2 * border_w + gap)
         canvas.paste(tile, (x, y))
     return _encode_jpeg(canvas)
 
-def _build_labeled_grid(image_paths, labels, bg, text_color) -> bytes:
+def _build_labeled_grid(image_paths, labels, bg, text_color, shape="auto") -> bytes:
     n = len(image_paths)
     if n < MIN_COLLAGE_PHOTOS:
         raise RuntimeError(f"Need at least {MIN_COLLAGE_PHOTOS} photos")
@@ -387,9 +417,9 @@ def _build_labeled_grid(image_paths, labels, bg, text_color) -> bytes:
             rows = math.ceil(n / cols)
     else:
         rows = math.ceil(n / cols)
+        
     gap, pad, label_gap, radius_ratio = style["gap"], style["pad"], style["label_gap"], 0.22 
-    rows_factor = rows * 1.28
-    cols_factor = cols
+    rows_factor, cols_factor = rows * 1.28, cols
     cell_by_h = int((MAX_COLLAGE_SIDE - pad * 2 - max(0, rows - 1) * gap) / max(rows_factor, 0.01))
     cell_by_w = int((MAX_COLLAGE_SIDE - pad * 2 - max(0, cols - 1) * gap) / max(cols_factor, 0.01))
     cell = max(64, min(cell_by_h, cell_by_w, 280))
@@ -400,12 +430,17 @@ def _build_labeled_grid(image_paths, labels, bg, text_color) -> bytes:
         text_h = bbox[3] - bbox[1]
     except Exception:
         text_h = font_size + 4
+        
     label_h = text_h + 8
     slot_h = cell + label_gap + label_h
-    canvas_w = pad * 2 + cols * cell + max(0, cols - 1) * gap
-    canvas_h = pad * 2 + rows * slot_h + max(0, rows - 1) * gap
+    
+    content_w = cols * cell + max(0, cols - 1) * gap
+    content_h = rows * slot_h + max(0, rows - 1) * gap
+    
+    canvas_w, canvas_h, start_x, start_y = _get_canvas_dims(content_w, content_h, pad, shape)
     canvas = Image.new("RGBA", (canvas_w, canvas_h), (*bg, 255))
     draw_bg = ImageDraw.Draw(canvas)
+    
     accent = tuple(min(255, c + 30) for c in bg[:3])
     accent2 = tuple(max(0, c - 40) for c in bg[:3])
     for cx, cy, r, col in (
@@ -415,17 +450,19 @@ def _build_labeled_grid(image_paths, labels, bg, text_color) -> bytes:
         (int(canvas_w * 0.05), int(canvas_h * 0.85), int(cell * 0.25), accent2),
     ):
         draw_bg.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(*col, 90))
+        
     radius = max(12, int(cell * radius_ratio))
     for i, path in enumerate(image_paths):
         row, col = divmod(i, cols)
-        x0 = pad + col * (cell + gap)
-        y0 = pad + row * (slot_h + gap)
+        x0 = start_x + col * (cell + gap)
+        y0 = start_y + row * (slot_h + gap)
         try:
             with Image.open(path) as im:
                 tile = _rounded_square(im, cell, radius)
         except Exception as e:
             logging.warning("skip tile %s: %s", path, e)
             tile = Image.new("RGBA", (cell, cell), (40, 40, 40, 255))
+            
         shadow = Image.new("RGBA", (cell + 12, cell + 12), (0, 0, 0, 0))
         sh_mask = Image.new("L", (cell, cell), 0)
         ImageDraw.Draw(sh_mask).rounded_rectangle([0, 0, cell - 1, cell - 1], radius=radius, fill=140)
@@ -434,6 +471,7 @@ def _build_labeled_grid(image_paths, labels, bg, text_color) -> bytes:
         shadow.paste(sh_layer, (6, 8), sh_layer)
         canvas.alpha_composite(shadow, (x0 - 2, y0 - 2))
         canvas.alpha_composite(tile, (x0, y0))
+        
         label = (labels[i] if i < len(labels) else "") or f"{i + 1}"
         if len(label) > 22:
             label = label[:20] + "…"
@@ -446,9 +484,10 @@ def _build_labeled_grid(image_paths, labels, bg, text_color) -> bytes:
         tx = x0 + (cell - tw) // 2
         ty = y0 + cell + label_gap
         draw.text((tx, ty), label, font=font, fill=(*text_color, 255))
+        
     return _encode_jpeg(canvas.convert("RGB"))
 
-def _build_glide_grid(image_paths, labels, bg, text_color) -> bytes:
+def _build_glide_grid(image_paths, labels, bg, text_color, shape="auto") -> bytes:
     n = len(image_paths)
     if n < MIN_COLLAGE_PHOTOS:
         raise RuntimeError(f"Need at least {MIN_COLLAGE_PHOTOS} photos")
@@ -464,6 +503,7 @@ def _build_glide_grid(image_paths, labels, bg, text_color) -> bytes:
         while rows > cols + 1 and cols < 8:
             cols += 1
             rows = math.ceil(n / cols)
+            
     gap, pad, label_gap = style["gap"], style["pad"], style["label_gap"]
     radius = min(style["radius"], 80)
     cell = max(72, min(int((MAX_COLLAGE_SIDE - pad * 2 - (cols - 1) * gap) / max(cols, 1)), 320))
@@ -474,13 +514,16 @@ def _build_glide_grid(image_paths, labels, bg, text_color) -> bytes:
         text_h = bbox[3] - bbox[1]
     except Exception:
         text_h = font_size + 4
+        
     label_h = text_h + 10
     slot_w = cell + gap
-    total_content_w = cols * cell + (cols - 1) * gap
     slot_h = cell + label_gap + label_h
-    total_content_h = rows * slot_h + (rows - 1) * gap
-    canvas_w = pad * 2 + total_content_w
-    canvas_h = pad * 2 + slot_h if n <= 2 else max(pad * 2 + total_content_h, int(MAX_COLLAGE_SIDE * 0.6))
+    
+    content_w = cols * cell + (cols - 1) * gap
+    content_h = rows * slot_h + (rows - 1) * gap
+    min_h = int(MAX_COLLAGE_SIDE * 0.6) if n > 2 else 0
+    canvas_w, canvas_h, start_x, start_y = _get_canvas_dims(content_w, content_h, pad, shape, min_h)
+    
     canvas = Image.new("RGBA", (canvas_w, canvas_h), (*bg, 255))
     draw_bg = ImageDraw.Draw(canvas)
     accent_light = tuple(min(255, c + 35) for c in bg[:3])
@@ -495,17 +538,23 @@ def _build_glide_grid(image_paths, labels, bg, text_color) -> bytes:
     ]
     for cx, cy, r, col in blobs:
         draw_bg.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(*col, 55))
-    x_offset = pad + (total_content_w - (n * cell + (n - 1) * gap)) // 2 if rows == 1 and n < cols else pad
+        
     for i, path in enumerate(image_paths):
         row, col = divmod(i, cols)
-        x0 = x_offset + col * (cell + gap)
-        y0 = pad + row * (slot_h + gap)
+        if rows == 1 and n < cols:
+            row_w = n * cell + (n - 1) * gap
+            x0 = start_x + (content_w - row_w) // 2 + col * (cell + gap)
+        else:
+            x0 = start_x + col * (cell + gap)
+        y0 = start_y + row * (slot_h + gap)
+        
         try:
             with Image.open(path) as im:
                 tile = _rounded_square(im, cell, radius)
         except Exception as e:
             logging.warning("skip tile %s: %s", path, e)
             tile = Image.new("RGBA", (cell, cell), (40, 40, 40, 255))
+            
         shadow = Image.new("RGBA", (cell + 16, cell + 16), (0, 0, 0, 0))
         sh_mask = Image.new("L", (cell, cell), 0)
         ImageDraw.Draw(sh_mask).rounded_rectangle([0, 0, cell - 1, cell - 1], radius=radius, fill=180)
@@ -517,9 +566,11 @@ def _build_glide_grid(image_paths, labels, bg, text_color) -> bytes:
         shadow.paste(sh_layer1, (2, 4), sh_layer1)
         canvas.alpha_composite(shadow, (x0 - 4, y0 - 2))
         canvas.alpha_composite(tile, (x0, y0))
+        
         glow = Image.new("RGBA", (cell, cell), (0, 0, 0, 0))
         ImageDraw.Draw(glow).rounded_rectangle([0, 0, cell - 1, cell - 1], radius=radius, outline=(*accent_glow, 60), width=1)
         canvas.alpha_composite(glow, (x0, y0))
+        
         label = (labels[i] if i < len(labels) else "") or f"{i + 1}"
         if len(label) > 24: label = label[:22] + "…"
         draw = ImageDraw.Draw(canvas)
@@ -532,9 +583,10 @@ def _build_glide_grid(image_paths, labels, bg, text_color) -> bytes:
         ty = y0 + cell + label_gap
         draw.text((tx + 1, ty + 1), label, font=font, fill=(0, 0, 0, 80))
         draw.text((tx, ty), label, font=font, fill=(*text_color, 255))
+        
     return _encode_jpeg(canvas.convert("RGB"))
 
-def _build_app_style_grid(image_paths, labels, bg, text_color) -> bytes:
+def _build_app_style_grid(image_paths, labels, bg, text_color, shape="auto") -> bytes:
     n = len(image_paths)
     if n < MIN_COLLAGE_PHOTOS:
         raise RuntimeError(f"Need at least {MIN_COLLAGE_PHOTOS} photos")
@@ -542,6 +594,7 @@ def _build_app_style_grid(image_paths, labels, bg, text_color) -> bytes:
     cols = min(4, n) if n <= 4 else (4 if n <= 8 else math.ceil(math.sqrt(n)))
     if n > 8 and cols < 4: cols = 4
     rows = math.ceil(n / cols)
+    
     pad, gap, label_gap = style["pad"], style["gap"], style["label_gap"]
     cell = min(260, int((MAX_COLLAGE_SIDE - pad * 2 - (cols - 1) * gap) / cols))
     radius = int(cell * 0.25)
@@ -552,21 +605,25 @@ def _build_app_style_grid(image_paths, labels, bg, text_color) -> bytes:
         label_h = bbox[3] - bbox[1] + 10
     except:
         label_h = font_size + 10
+        
     slot_w = cell
     slot_h = cell + label_gap + label_h
-    total_w = cols * slot_w + (cols - 1) * gap
-    total_h = rows * slot_h + (rows - 1) * gap
-    canvas_w = pad * 2 + total_w
-    canvas_h = pad * 2 + total_h
+    
+    content_w = cols * slot_w + (cols - 1) * gap
+    content_h = rows * slot_h + (rows - 1) * gap
+    canvas_w, canvas_h, start_x, start_y = _get_canvas_dims(content_w, content_h, pad, shape)
+    
     canvas = Image.new("RGBA", (canvas_w, canvas_h), (*bg, 255))
     draw = ImageDraw.Draw(canvas)
     c_orange, c_red = (235, 90, 50, 180), (210, 40, 40, 180)
+    
     draw.ellipse([-canvas_w * 0.05, -canvas_h * 0.05, canvas_w * 0.15, canvas_h * 0.15], fill=c_orange)
     draw.ellipse([canvas_w * 0.85, -canvas_h * 0.1, canvas_w * 1.1, canvas_h * 0.15], fill=c_red)
     draw.ellipse([-canvas_w * 0.1, canvas_h * 0.8, canvas_w * 0.15, canvas_h * 1.1], fill=c_red)
     draw.ellipse([canvas_w * 0.8, canvas_h * 0.85, canvas_w * 1.05, canvas_h * 1.05], fill=c_orange)
     draw.ellipse([canvas_w * 0.15, canvas_h * 0.2, canvas_w * 0.15 + 25, canvas_h * 0.2 + 25], fill=c_orange)
     draw.ellipse([canvas_w * 0.82, canvas_h * 0.75, canvas_w * 0.82 + 30, canvas_h * 0.75 + 30], fill=c_orange)
+    
     border_w = max(4, int(cell * 0.05))
     border_color = (15, 15, 25, 255)
     for i, path in enumerate(image_paths):
@@ -574,18 +631,20 @@ def _build_app_style_grid(image_paths, labels, bg, text_color) -> bytes:
         items_in_this_row = n - row * cols
         if items_in_this_row < cols and row == rows - 1:
             row_w = items_in_this_row * slot_w + (items_in_this_row - 1) * gap
-            x0 = pad + (total_w - row_w) // 2 + col * (slot_w + gap)
+            x0 = start_x + (content_w - row_w) // 2 + col * (slot_w + gap)
         else:
-            x0 = pad + col * (slot_w + gap)
-        y0 = pad + row * (slot_h + gap)
+            x0 = start_x + col * (slot_w + gap)
+        y0 = start_y + row * (slot_h + gap)
         try:
             with Image.open(path) as im:
                 tile = _rounded_square(im, cell, radius)
         except Exception as e:
             logging.warning("skip tile %s: %s", path, e)
             tile = Image.new("RGBA", (cell, cell), (40, 40, 40, 255))
+            
         draw.rounded_rectangle([x0 - border_w, y0 - border_w, x0 + cell + border_w, y0 + cell + border_w], radius=radius + border_w, fill=border_color)
         canvas.alpha_composite(tile, (x0, y0))
+        
         label = (labels[i] if i < len(labels) else "") or f"{i + 1}"
         if len(label) > 20: label = label[:18] + "…"
         try:
@@ -597,17 +656,19 @@ def _build_app_style_grid(image_paths, labels, bg, text_color) -> bytes:
         ty = y0 + cell + label_gap
         draw.text((tx + 1, ty + 1), label, font=font, fill=(0, 0, 0, 90))
         draw.text((tx, ty), label, font=font, fill=(*text_color, 255))
+        
     return _encode_jpeg(canvas.convert("RGB"))
 
-def _build_grid_collage(image_paths, style_key, labels=None, bg=None, text_color=None) -> bytes:
+def _build_grid_collage(image_paths, style_key, labels=None, bg=None, text_color=None, shape="auto") -> bytes:
     style = STYLES[style_key]
     if style.get("kind") == "labeled":
-        return _build_labeled_grid(image_paths, labels or [], bg or style["bg"], text_color or style["text_color"])
+        return _build_labeled_grid(image_paths, labels or [], bg or style["bg"], text_color or style["text_color"], shape)
     if style.get("kind") == "glide":
-        return _build_glide_grid(image_paths, labels or [], bg or style["bg"], text_color or style["text_color"])
+        return _build_glide_grid(image_paths, labels or [], bg or style["bg"], text_color or style["text_color"], shape)
     if style.get("kind") == "app_style":
-        return _build_app_style_grid(image_paths, labels or [], bg or style["bg"], text_color or style["text_color"])
-    return _build_plain_grid(image_paths, style_key)
+        return _build_app_style_grid(image_paths, labels or [], bg or style["bg"], text_color or style["text_color"], shape)
+    return _build_plain_grid(image_paths, style_key, shape)
+
 
 async def _save_incoming_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     count = context.user_data.get("collage_count", 0)
@@ -657,7 +718,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Commands*\n"
         "• Send X profile link / @username → HQ PFP photo\n"
-        "• /collage → grid collage (6 styles, including App Showcase)",
+        "• /collage → grid collage (Shape selection included)",
         parse_mode="Markdown",
     )
 
@@ -744,12 +805,6 @@ async def collage_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🧩 *Collage mode*\n\n"
         "Choose a *grid style*:\n\n"
-        f"1️⃣ *{STYLES['classic']['title']}* — {STYLES['classic']['desc']}\n"
-        f"2️⃣ *{STYLES['tight']['title']}* — {STYLES['tight']['desc']}\n"
-        f"3️⃣ *{STYLES['bordered']['title']}* — {STYLES['bordered']['desc']}\n"
-        f"4️⃣ *{STYLES['labeled']['title']}* — {STYLES['labeled']['desc']}\n"
-        f"5️⃣ *{STYLES['glide']['title']}* — {STYLES['glide']['desc']}\n"
-        f"6️⃣ *{STYLES['app_style']['title']}* — {STYLES['app_style']['desc']}\n\n"
         f"Photos: *{MIN_COLLAGE_PHOTOS}–{MAX_COLLAGE_PHOTOS}*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -769,19 +824,56 @@ async def collage_style_chosen(update: Update, context: ContextTypes.DEFAULT_TYP
     if style_key not in STYLES:
         await query.edit_message_text("Unknown style. /collage again.")
         return ConversationHandler.END
+    
     context.user_data["collage_style"] = style_key
+    
+    # New Shape Selection Keyboard
+    keyboard = [
+        [InlineKeyboardButton("📐 Auto (Fit Content)", callback_data="shape:auto")],
+        [InlineKeyboardButton("⬛ Square (1:1 - Best for X)", callback_data="shape:square")],
+        [InlineKeyboardButton("📱 Portrait (4:5 - Best for Mobile)", callback_data="shape:portrait")],
+        [InlineKeyboardButton("🖥️ Landscape (16:9 - Wide)", callback_data="shape:landscape")],
+    ]
+    await query.edit_message_text(
+        f"✅ Style: *{STYLES[style_key]['title']}*\n\n"
+        "Now choose the *Shape (Aspect Ratio)* for your collage:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return SHAPE_SELECT
+
+async def collage_shape_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+        
+    data = query.data or ""
+    if not data.startswith("shape:"):
+        return ConversationHandler.END
+        
+    shape_key = data.split(":", 1)[1]
+    context.user_data["collage_shape"] = shape_key
+    
+    style_key = context.user_data["collage_style"]
     s = STYLES[style_key]
+    
+    shape_titles = {"auto": "Auto", "square": "Square (1:1)", "portrait": "Portrait (4:5)", "landscape": "Landscape (16:9)"}
+    shape_title = shape_titles.get(shape_key, "Auto")
+
     if s.get("kind") in ("labeled", "glide", "app_style"):
         await query.edit_message_text(
-            f"✅ Style: *{s['title']}*\n\nNow choose *background colour*:",
+            f"✅ Style: *{s['title']}*\n✅ Shape: *{shape_title}*\n\n"
+            "Now choose *background colour*:",
             parse_mode="Markdown",
             reply_markup=_bg_keyboard(),
         )
         return BG_SELECT
+        
     _session_dir(context)
     context.user_data["collage_count"] = 0
     await query.edit_message_text(
-        f"✅ Style: *{s['title']}*\n\n"
+        f"✅ Style: *{s['title']}*\n✅ Shape: *{shape_title}*\n\n"
         f"Send photos ({MIN_COLLAGE_PHOTOS}–{MAX_COLLAGE_PHOTOS}).\n"
         "When finished → /done",
         parse_mode="Markdown",
@@ -894,22 +986,26 @@ async def collage_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return ConversationHandler.END
     style_key = context.user_data.get("collage_style")
+    shape_key = context.user_data.get("collage_shape", "auto")
     count = context.user_data.get("collage_count", 0)
     session = context.user_data.get("collage_dir")
+    
     if not style_key or not session:
         await update.message.reply_text("No active collage. Start with /collage")
         return ConversationHandler.END
     if count < MIN_COLLAGE_PHOTOS:
         await update.message.reply_text(f"Need at least {MIN_COLLAGE_PHOTOS} photos (have {count}). Keep sending.")
         return COLLECTING
+        
     status = await update.message.reply_text(f"🧩 Building *{STYLES[style_key]['title']}* collage from {count} photos...", parse_mode="Markdown")
     paths = sorted(Path(session).glob("*.jpg"))
     labels_map = context.user_data.get("collage_labels") or {}
     labels = [labels_map.get(p.name, "") for p in paths]
     bg = context.user_data.get("collage_bg")
     text_color = context.user_data.get("collage_text")
+    
     try:
-        data = await asyncio.to_thread(_build_grid_collage, paths, style_key, labels, bg, text_color)
+        data = await asyncio.to_thread(_build_grid_collage, paths, style_key, labels, bg, text_color, shape_key)
         bio = BytesIO(data)
         bio.seek(0)
         await context.bot.send_photo(
@@ -941,6 +1037,7 @@ if __name__ == "__main__":
         entry_points=[CommandHandler("collage", collage_start)],
         states={
             STYLE_SELECT: [CallbackQueryHandler(collage_style_chosen, pattern=r"^style:")],
+            SHAPE_SELECT: [CallbackQueryHandler(collage_shape_chosen, pattern=r"^shape:")],
             BG_SELECT: [
                 CallbackQueryHandler(collage_bg_chosen, pattern=r"^bg:"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, collage_bg_custom_text),
