@@ -9,6 +9,7 @@ from flask import Flask
 from threading import Thread
 from telegram import Update, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from PIL import Image, ImageEnhance, ImageFilter
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -17,6 +18,9 @@ logging.basicConfig(
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_ADMIN_ID = int(os.getenv("TARGET_ADMIN_ID", 0))
+
+# Output size for sharp full-screen viewing on phones
+TARGET_SIZE = 1024
 
 UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -53,12 +57,12 @@ def _http_get(url: str, timeout: int = 45):
 
 
 def _avatar_variants(avatar_url: str):
-    """Twitter CDN variants. Original (no size suffix) is best quality available."""
+    """Build Twitter CDN variants. Original (no size suffix) is best quality."""
     urls = []
     if not avatar_url:
         return urls
 
-    # _normal is only 48x48 (blurry). Strip size suffixes for full original.
+    # _normal = 48x48 blurry. Strip size suffixes for original CDN file.
     original = re.sub(
         r"_(normal|bigger|mini|200x200|400x400|x96)(?=\.[A-Za-z0-9]+$)",
         "",
@@ -66,24 +70,76 @@ def _avatar_variants(avatar_url: str):
     )
     if "." in original:
         four = re.sub(r"(\.[A-Za-z0-9]+)$", r"_400x400\1", original)
+        bigger = re.sub(r"(\.[A-Za-z0-9]+)$", r"_bigger\1", original)
     else:
         four = original
+        bigger = original
 
-    for u in (original, four, avatar_url):
+    for u in (original, four, bigger, avatar_url):
         if u and u not in urls:
             urls.append(u)
     return urls
 
 
+def _enhance_to_hq(data: bytes) -> tuple[bytes, str]:
+    """
+    X stores PFPs at max ~400x400 — on phone screens that looks soft/blurry.
+    We take the best source pixels, upscale with LANCZOS + mild sharpen,
+    and export a high-quality JPEG for sharp full-screen viewing.
+    """
+    im = Image.open(BytesIO(data))
+    if im.mode not in ("RGB", "L"):
+        # keep alpha as white background for RGBA
+        if im.mode in ("RGBA", "LA", "P"):
+            bg = Image.new("RGB", im.size, (255, 255, 255))
+            rgba = im.convert("RGBA")
+            bg.paste(rgba, mask=rgba.split()[-1])
+            im = bg
+        else:
+            im = im.convert("RGB")
+    else:
+        im = im.convert("RGB")
+
+    w, h = im.size
+    logging.info("source image %sx%s", w, h)
+
+    # Reject tiny/broken images (likely _normal 48px)
+    if max(w, h) < 80:
+        raise RuntimeError(f"source too small: {w}x{h}")
+
+    # Upscale so phone full-screen is not blocky
+    if max(w, h) < TARGET_SIZE:
+        scale = TARGET_SIZE / float(max(w, h))
+        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+        im = im.resize(new_size, Image.Resampling.LANCZOS)
+        # Mild sharpen — makes edges crisp after upscale
+        im = im.filter(ImageFilter.UnsharpMask(radius=1.4, percent=140, threshold=2))
+        im = ImageEnhance.Sharpness(im).enhance(1.15)
+        im = ImageEnhance.Contrast(im).enhance(1.05)
+    else:
+        # Already large enough — light polish only
+        im = ImageEnhance.Sharpness(im).enhance(1.1)
+
+    out = BytesIO()
+    # quality=97 + no chroma subsampling = clean JPEG
+    im.save(
+        out,
+        format="JPEG",
+        quality=97,
+        optimize=True,
+        progressive=True,
+        subsampling=0,
+    )
+    return out.getvalue(), "jpg"
+
+
 def _download_hq_avatar(username: str):
     """
-    Real HQ:
-    1) FixTweet API -> real pbs.twimg.com avatar URL
-    2) Strip _normal (48x48) so we get original CDN image
-    3) Pick largest download
-    4) unavatar only as last fallback (often low quality)
+    1) FixTweet -> real pbs.twimg.com URL
+    2) Strip _normal, pick largest CDN file
+    3) Enhance/upscale to sharp 1024px JPEG
     """
-    candidates = []
+    candidates = []  # (bytes_len, data, final_url)
 
     try:
         raw, _, _ = _http_get(f"https://api.fxtwitter.com/{username}")
@@ -94,25 +150,31 @@ def _download_hq_avatar(username: str):
         for url in _avatar_variants(avatar_url):
             try:
                 data, final, ctype = _http_get(url)
-                if not data or len(data) < 500:
+                if not data or len(data) < 800:
                     continue
                 if "html" in ctype.lower() or data[:1] in (b"<", b"{"):
                     continue
-                candidates.append((len(data), data, final))
+                # Prefer larger payloads; skip obvious tiny thumbs
+                if len(data) < 3000:
+                    # might still be bigger.jpg ~2.5kb — keep as last resort
+                    candidates.append((len(data), data, final))
+                else:
+                    candidates.append((len(data) + 10_000_000, data, final))  # boost non-tiny
                 logging.info("@%s candidate %s bytes <- %s", username, len(data), final)
             except Exception as e:
                 logging.info("@%s variant fail %s: %s", username, url, e)
     except Exception as e:
         logging.warning("@%s fxtwitter failed: %s", username, e)
 
-    if not candidates:
+    # Fallback sources
+    if not any(c[0] > 10_000_000 for c in candidates):
         for u in (
             f"https://unavatar.io/x/{username}?size=4096",
             f"https://unavatar.io/twitter/{username}?size=4096",
         ):
             try:
                 data, final, ctype = _http_get(u)
-                if data and len(data) >= 500 and "html" not in ctype.lower():
+                if data and len(data) >= 800 and "html" not in ctype.lower():
                     candidates.append((len(data), data, final))
             except Exception as e:
                 logging.info("@%s unavatar fail %s: %s", username, u, e)
@@ -120,18 +182,26 @@ def _download_hq_avatar(username: str):
     if not candidates:
         raise RuntimeError(f"No avatar found for @{username}")
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    size, data, final = candidates[0]
-    logging.info("@%s CHOSE %s bytes from %s", username, size, final)
+    # Sort by score (boosted size), then real size
+    candidates.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
 
-    ext = "jpg"
-    low = (final or "").lower()
-    if low.endswith(".png") or data[:8].startswith(b"\x89PNG"):
-        ext = "png"
-    elif low.endswith(".webp") or data[:4] == b"RIFF":
-        ext = "webp"
+    last_err = None
+    for score, data, final in candidates:
+        try:
+            hq_bytes, ext = _enhance_to_hq(data)
+            logging.info(
+                "@%s CHOSE source=%s (%s bytes) -> hq=%s bytes",
+                username,
+                final,
+                len(data),
+                len(hq_bytes),
+            )
+            return hq_bytes, f"{username}_hq.{ext}"
+        except Exception as e:
+            last_err = e
+            logging.info("@%s enhance fail for %s: %s", username, final, e)
 
-    return data, f"{username}_hq.{ext}"
+    raise RuntimeError(f"Could not build HQ avatar for @{username}: {last_err}")
 
 
 async def download_hq_avatar(username: str):
@@ -182,7 +252,6 @@ async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYP
             data, filename = await download_hq_avatar(x_username)
             bio = BytesIO(data)
             bio.seek(0)
-            # send_document keeps original file quality (no Telegram photo compression)
             await context.bot.send_document(
                 chat_id=TARGET_ADMIN_ID,
                 document=InputFile(bio, filename=filename),
