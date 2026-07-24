@@ -339,7 +339,7 @@ def _encode_jpeg(canvas: Image.Image) -> bytes:
         data = out.getvalue()
     return data
 
-def _build_plain_grid(image_paths: list[Path], style_key: str) -> bytes:
+def _build_plain_grid(image_paths, style_key) -> bytes:
     style = STYLES[style_key]
     n = len(image_paths)
     if n < MIN_COLLAGE_PHOTOS:
@@ -372,7 +372,7 @@ def _build_plain_grid(image_paths: list[Path], style_key: str) -> bytes:
         canvas.paste(tile, (x, y))
     return _encode_jpeg(canvas)
 
-def _build_labeled_grid(image_paths: list[Path], labels: list[str], bg: tuple, text_color: tuple) -> bytes:
+def _build_labeled_grid(image_paths, labels, bg, text_color) -> bytes:
     n = len(image_paths)
     if n < MIN_COLLAGE_PHOTOS:
         raise RuntimeError(f"Need at least {MIN_COLLAGE_PHOTOS} photos")
@@ -448,7 +448,7 @@ def _build_labeled_grid(image_paths: list[Path], labels: list[str], bg: tuple, t
         draw.text((tx, ty), label, font=font, fill=(*text_color, 255))
     return _encode_jpeg(canvas.convert("RGB"))
 
-def _build_glide_grid(image_paths: list[Path], labels: list[str], bg: tuple, text_color: tuple) -> bytes:
+def _build_glide_grid(image_paths, labels, bg, text_color) -> bytes:
     n = len(image_paths)
     if n < MIN_COLLAGE_PHOTOS:
         raise RuntimeError(f"Need at least {MIN_COLLAGE_PHOTOS} photos")
@@ -534,7 +534,7 @@ def _build_glide_grid(image_paths: list[Path], labels: list[str], bg: tuple, tex
         draw.text((tx, ty), label, font=font, fill=(*text_color, 255))
     return _encode_jpeg(canvas.convert("RGB"))
 
-def _build_app_style_grid(image_paths: list[Path], labels: list[str], bg: tuple, text_color: tuple) -> bytes:
+def _build_app_style_grid(image_paths, labels, bg, text_color) -> bytes:
     n = len(image_paths)
     if n < MIN_COLLAGE_PHOTOS:
         raise RuntimeError(f"Need at least {MIN_COLLAGE_PHOTOS} photos")
@@ -599,7 +599,7 @@ def _build_app_style_grid(image_paths: list[Path], labels: list[str], bg: tuple,
         draw.text((tx, ty), label, font=font, fill=(*text_color, 255))
     return _encode_jpeg(canvas.convert("RGB"))
 
-def _build_grid_collage(image_paths: list[Path], style_key: str, labels: list[str] | None = None, bg: tuple | None = None, text_color: tuple | None = None) -> bytes:
+def _build_grid_collage(image_paths, style_key, labels=None, bg=None, text_color=None) -> bytes:
     style = STYLES[style_key]
     if style.get("kind") == "labeled":
         return _build_labeled_grid(image_paths, labels or [], bg or style["bg"], text_color or style["text_color"])
