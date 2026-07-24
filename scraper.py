@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageDraw, ImageFont
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -34,16 +34,17 @@ TARGET_ADMIN_ID = int(os.getenv("TARGET_ADMIN_ID", 0))
 TARGET_SIZE = 1024
 MAX_COLLAGE_PHOTOS = 1000
 MIN_COLLAGE_PHOTOS = 2
-MAX_COLLAGE_SIDE = 4000  # px
+MAX_COLLAGE_SIDE = 4000
 
 # Conversation states
-STYLE_SELECT, COLLECTING = range(2)
+STYLE_SELECT, BG_SELECT, TEXT_SELECT, COLLECTING = range(4)
 
-# All grid styles
+# All grid styles (old ones kept) + new labeled
 STYLES = {
     "classic": {
         "title": "Classic Grid",
         "desc": "Clean white grid with light spacing",
+        "kind": "plain",
         "gap": 6,
         "pad": 12,
         "bg": (255, 255, 255),
@@ -53,6 +54,7 @@ STYLES = {
     "tight": {
         "title": "Tight Grid",
         "desc": "No gaps — edge-to-edge mosaic",
+        "kind": "plain",
         "gap": 0,
         "pad": 0,
         "bg": (0, 0, 0),
@@ -62,12 +64,49 @@ STYLES = {
     "bordered": {
         "title": "Bordered Grid",
         "desc": "Dark background + thin white frames",
+        "kind": "plain",
         "gap": 8,
         "pad": 16,
         "bg": (18, 18, 18),
         "border": (240, 240, 240),
         "border_w": 2,
     },
+    "labeled": {
+        "title": "Labeled Grid",
+        "desc": "Rounded icons + text under each (like app grid)",
+        "kind": "labeled",
+        "gap": 28,
+        "pad": 48,
+        "bg": (126, 200, 227),  # default sky blue (overridable)
+        "border": None,
+        "border_w": 0,
+        "radius": 48,
+        "label_gap": 14,
+        "text_color": (255, 255, 255),  # overridable
+    },
+}
+
+# Color presets for labeled style
+BG_PRESETS = {
+    "sky": ((126, 200, 227), "Sky Blue"),
+    "light": ((240, 244, 248), "Light"),
+    "white": ((255, 255, 255), "White"),
+    "dark": ((28, 28, 32), "Dark"),
+    "black": ((0, 0, 0), "Black"),
+    "coral": ((255, 140, 105), "Coral"),
+    "mint": ((180, 230, 200), "Mint"),
+    "purple": ((120, 90, 180), "Purple"),
+}
+
+TEXT_PRESETS = {
+    "white": ((255, 255, 255), "White"),
+    "black": ((20, 20, 20), "Black"),
+    "red": ((220, 50, 50), "Red"),
+    "yellow": ((255, 220, 50), "Yellow"),
+    "green": ((40, 200, 100), "Green"),
+    "blue": ((40, 100, 255), "Blue"),
+    "orange": ((255, 140, 0), "Orange"),
+    "gray": ((160, 160, 160), "Gray"),
 }
 
 UA = (
@@ -94,6 +133,23 @@ def keep_alive():
 
 def is_admin(user_id: int) -> bool:
     return user_id == TARGET_ADMIN_ID
+
+
+def _parse_color(text: str):
+    """Parse #RRGGBB or R,G,B into (r,g,b) or None."""
+    if not text:
+        return None
+    t = text.strip().lower()
+    m = re.fullmatch(r"#?([0-9a-f]{6})", t)
+    if m:
+        h = m.group(1)
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    m = re.fullmatch(r"(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})", t)
+    if m:
+        rgb = tuple(int(m.group(i)) for i in range(1, 4))
+        if all(0 <= c <= 255 for c in rgb):
+            return rgb
+    return None
 
 
 # ───────────────── HQ avatar helpers ─────────────────
@@ -218,19 +274,27 @@ def _session_dir(context: ContextTypes.DEFAULT_TYPE) -> Path:
     d = tempfile.mkdtemp(prefix="collage_")
     context.user_data["collage_dir"] = d
     context.user_data["collage_count"] = 0
+    context.user_data["collage_labels"] = {}
     return Path(d)
 
 
 def _cleanup_session(context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data.pop("collage_dir", None)
-    context.user_data.pop("collage_count", None)
-    context.user_data.pop("collage_style", None)
+    for k in (
+        "collage_count",
+        "collage_style",
+        "collage_labels",
+        "collage_bg",
+        "collage_text",
+        "awaiting_custom_bg",
+        "awaiting_custom_text",
+    ):
+        context.user_data.pop(k, None)
     if d and os.path.isdir(d):
         shutil.rmtree(d, ignore_errors=True)
 
 
 def _fit_square(im: Image.Image, size: int) -> Image.Image:
-    """Center-crop to square then resize."""
     im = im.convert("RGB")
     w, h = im.size
     side = min(w, h)
@@ -240,7 +304,53 @@ def _fit_square(im: Image.Image, size: int) -> Image.Image:
     return im.resize((size, size), Image.Resampling.LANCZOS)
 
 
-def _build_grid_collage(image_paths: list[Path], style_key: str) -> bytes:
+def _rounded_square(im: Image.Image, size: int, radius: int) -> Image.Image:
+    """Square crop + rounded corners with soft edge (RGBA)."""
+    tile = _fit_square(im, size).convert("RGBA")
+    radius = max(4, min(radius, size // 2))
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, size - 1, size - 1], radius=radius, fill=255
+    )
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.paste(tile, (0, 0))
+    out.putalpha(mask)
+    return out
+
+
+def _load_font(size: int) -> ImageFont.ImageFont:
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            try:
+                return ImageFont.truetype(p, size=size)
+            except Exception:
+                pass
+    return ImageFont.load_default()
+
+
+def _encode_jpeg(canvas: Image.Image) -> bytes:
+    if canvas.mode != "RGB":
+        canvas = canvas.convert("RGB")
+    quality = 92
+    out = BytesIO()
+    canvas.save(out, format="JPEG", quality=quality, optimize=True, progressive=True, subsampling=0)
+    data = out.getvalue()
+    while len(data) > 9_500_000 and quality > 60:
+        quality -= 8
+        out = BytesIO()
+        canvas.save(out, format="JPEG", quality=quality, optimize=True, progressive=True)
+        data = out.getvalue()
+    return data
+
+
+def _build_plain_grid(image_paths: list[Path], style_key: str) -> bytes:
     style = STYLES[style_key]
     n = len(image_paths)
     if n < MIN_COLLAGE_PHOTOS:
@@ -253,22 +363,17 @@ def _build_grid_collage(image_paths: list[Path], style_key: str) -> bytes:
     border_w = style.get("border_w") or 0
     border_color = style.get("border")
 
-    # cell size so total side <= MAX_COLLAGE_SIDE
-    # total = pad*2 + cols*cell + (cols-1)*gap + cols*2*border_w (approx)
     overhead_w = pad * 2 + max(0, cols - 1) * gap + cols * 2 * border_w
     overhead_h = pad * 2 + max(0, rows - 1) * gap + rows * 2 * border_w
     cell = max(24, (MAX_COLLAGE_SIDE - overhead_w) // cols)
-    cell = min(cell, 256)  # cap cell for huge batches (memory)
+    cell = min(cell, 256)
 
     canvas_w = pad * 2 + cols * cell + max(0, cols - 1) * gap + cols * 2 * border_w
     canvas_h = pad * 2 + rows * cell + max(0, rows - 1) * gap + rows * 2 * border_w
     canvas = Image.new("RGB", (canvas_w, canvas_h), style["bg"])
 
     for i, path in enumerate(image_paths):
-        r, c = divmod(i, cols)
-        # actually row-major: i // cols, i % cols
-        row = i // cols
-        col = i % cols
+        row, col = divmod(i, cols)
         try:
             with Image.open(path) as im:
                 tile = _fit_square(im, cell)
@@ -283,21 +388,143 @@ def _build_grid_collage(image_paths: list[Path], style_key: str) -> bytes:
         y = pad + row * (cell + 2 * border_w + gap)
         canvas.paste(tile, (x, y))
 
-    out = BytesIO()
-    # Prefer JPEG photo under ~9MB for Telegram send_photo
-    quality = 92
-    canvas.save(out, format="JPEG", quality=quality, optimize=True, progressive=True, subsampling=0)
-    data = out.getvalue()
-    while len(data) > 9_500_000 and quality > 60:
-        quality -= 8
-        out = BytesIO()
-        canvas.save(out, format="JPEG", quality=quality, optimize=True, progressive=True)
-        data = out.getvalue()
-    return data
+    return _encode_jpeg(canvas)
+
+
+def _build_labeled_grid(
+    image_paths: list[Path],
+    labels: list[str],
+    bg: tuple,
+    text_color: tuple,
+) -> bytes:
+    """App-icon style grid: rounded tiles + caption under each."""
+    n = len(image_paths)
+    if n < MIN_COLLAGE_PHOTOS:
+        raise RuntimeError(f"Need at least {MIN_COLLAGE_PHOTOS} photos")
+
+    style = STYLES["labeled"]
+    cols = math.ceil(math.sqrt(n))
+    # Prefer wider grids for labeled (like 4-col app rows when possible)
+    if n >= 4:
+        cols = min(cols + (0 if n <= 9 else 1), max(4, cols))
+        cols = min(cols, 8)
+        rows = math.ceil(n / cols)
+        # rebalance if too tall
+        while rows > cols + 1 and cols < 10:
+            cols += 1
+            rows = math.ceil(n / cols)
+    else:
+        rows = math.ceil(n / cols)
+
+    gap = style["gap"]
+    pad = style["pad"]
+    label_gap = style["label_gap"]
+    radius_ratio = 0.22  # rounded like reference icons
+
+    # Reserve space under each tile for label
+    # Estimate font ~14% of cell
+    # total height ~ pad*2 + rows*(cell + label_h + label_gap) + (rows-1)*gap
+    # total width ~ pad*2 + cols*cell + (cols-1)*gap
+    # Fit in MAX_COLLAGE_SIDE
+    # label_h ≈ cell * 0.22
+    # cell * rows * 1.22 + gaps + pad <= MAX
+    rows_factor = rows * 1.28
+    cols_factor = cols
+    cell_by_h = int((MAX_COLLAGE_SIDE - pad * 2 - max(0, rows - 1) * gap) / max(rows_factor, 0.01))
+    cell_by_w = int((MAX_COLLAGE_SIDE - pad * 2 - max(0, cols - 1) * gap) / max(cols_factor, 0.01))
+    cell = max(64, min(cell_by_h, cell_by_w, 280))
+
+    font_size = max(14, int(cell * 0.16))
+    font = _load_font(font_size)
+    # measure label height with a sample
+    dummy = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    try:
+        bbox = dummy.textbbox((0, 0), "Ay", font=font)
+        text_h = bbox[3] - bbox[1]
+    except Exception:
+        text_h = font_size + 4
+    label_h = text_h + 8
+
+    slot_h = cell + label_gap + label_h
+    canvas_w = pad * 2 + cols * cell + max(0, cols - 1) * gap
+    canvas_h = pad * 2 + rows * slot_h + max(0, rows - 1) * gap
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (*bg, 255))
+
+    # subtle decorative blobs (like reference) — soft circles
+    draw_bg = ImageDraw.Draw(canvas)
+    accent = tuple(min(255, c + 30) for c in bg[:3])
+    accent2 = tuple(max(0, c - 40) for c in bg[:3])
+    for cx, cy, r, col in (
+        (int(canvas_w * 0.08), int(canvas_h * 0.12), int(cell * 0.35), accent),
+        (int(canvas_w * 0.95), int(canvas_h * 0.08), int(cell * 0.2), accent2),
+        (int(canvas_w * 0.9), int(canvas_h * 0.9), int(cell * 0.45), accent),
+        (int(canvas_w * 0.05), int(canvas_h * 0.85), int(cell * 0.25), accent2),
+    ):
+        draw_bg.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(*col, 90))
+
+    radius = max(12, int(cell * radius_ratio))
+
+    for i, path in enumerate(image_paths):
+        row, col = divmod(i, cols)
+        x0 = pad + col * (cell + gap)
+        y0 = pad + row * (slot_h + gap)
+
+        try:
+            with Image.open(path) as im:
+                tile = _rounded_square(im, cell, radius)
+        except Exception as e:
+            logging.warning("skip tile %s: %s", path, e)
+            tile = Image.new("RGBA", (cell, cell), (40, 40, 40, 255))
+
+        # soft drop shadow
+        shadow = Image.new("RGBA", (cell + 12, cell + 12), (0, 0, 0, 0))
+        sh_mask = Image.new("L", (cell, cell), 0)
+        ImageDraw.Draw(sh_mask).rounded_rectangle(
+            [0, 0, cell - 1, cell - 1], radius=radius, fill=140
+        )
+        sh_layer = Image.new("RGBA", (cell, cell), (0, 0, 0, 80))
+        sh_layer.putalpha(sh_mask)
+        shadow.paste(sh_layer, (6, 8), sh_layer)
+        canvas.alpha_composite(shadow, (x0 - 2, y0 - 2))
+        canvas.alpha_composite(tile, (x0, y0))
+
+        label = (labels[i] if i < len(labels) else "") or f"{i + 1}"
+        # truncate long labels
+        if len(label) > 22:
+            label = label[:20] + "…"
+
+        draw = ImageDraw.Draw(canvas)
+        try:
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw = bbox[2] - bbox[0]
+        except Exception:
+            tw = len(label) * font_size // 2
+        tx = x0 + (cell - tw) // 2
+        ty = y0 + cell + label_gap
+        draw.text((tx, ty), label, font=font, fill=(*text_color, 255))
+
+    return _encode_jpeg(canvas.convert("RGB"))
+
+
+def _build_grid_collage(
+    image_paths: list[Path],
+    style_key: str,
+    labels: list[str] | None = None,
+    bg: tuple | None = None,
+    text_color: tuple | None = None,
+) -> bytes:
+    style = STYLES[style_key]
+    if style.get("kind") == "labeled":
+        return _build_labeled_grid(
+            image_paths,
+            labels or [],
+            bg or style["bg"],
+            text_color or style["text_color"],
+        )
+    return _build_plain_grid(image_paths, style_key)
 
 
 async def _save_incoming_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Download photo/document image into session dir. Returns True if saved."""
     count = context.user_data.get("collage_count", 0)
     if count >= MAX_COLLAGE_PHOTOS:
         await update.message.reply_text(
@@ -320,22 +547,37 @@ async def _save_incoming_image(update: Update, context: ContextTypes.DEFAULT_TYP
 
     session = _session_dir(context)
     idx = count + 1
-    path = session / f"{idx:04d}.jpg"
+    fname = f"{idx:04d}.jpg"
+    path = session / fname
+
+    # Label = photo caption (for labeled style)
+    caption = (update.message.caption or "").strip()
+    labels = context.user_data.setdefault("collage_labels", {})
+    labels[fname] = caption
 
     def _write():
         im = Image.open(BytesIO(bytes(raw)))
-        # store medium square thumb to save disk/RAM
         tile = _fit_square(im, 512)
         tile.save(path, format="JPEG", quality=90, optimize=True)
 
     await asyncio.to_thread(_write)
     context.user_data["collage_count"] = idx
 
-    # Progress every 10 photos or first few
-    if idx <= 3 or idx % 10 == 0 or idx == MAX_COLLAGE_PHOTOS:
-        await update.message.reply_text(
-            f"📸 Saved {idx}/{MAX_COLLAGE_PHOTOS}. Send more or /done"
-        )
+    style_key = context.user_data.get("collage_style")
+    if style_key == "labeled":
+        shown = caption if caption else "(no caption — will use number)"
+        if idx <= 5 or idx % 10 == 0 or idx == MAX_COLLAGE_PHOTOS:
+            await update.message.reply_text(
+                f"📸 {idx} saved — label: *{shown}*\n"
+                f"Tip: send photo *with caption* for text under icon.\n"
+                f"More photos or /done",
+                parse_mode="Markdown",
+            )
+    else:
+        if idx <= 3 or idx % 10 == 0 or idx == MAX_COLLAGE_PHOTOS:
+            await update.message.reply_text(
+                f"📸 Saved {idx}/{MAX_COLLAGE_PHOTOS}. Send more or /done"
+            )
     return True
 
 
@@ -347,7 +589,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Commands*\n"
         "• Send X profile link / @username → HQ PFP photo\n"
-        "• /collage → make a grid collage from many photos\n"
+        "• /collage → grid collage (4 styles, including labeled)\n"
         "• /cancel → cancel collage session",
         parse_mode="Markdown",
     )
@@ -356,8 +598,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    # Ignore if in collage collecting mode (conversation handles that)
-    if context.user_data.get("collage_style"):
+    if context.user_data.get("collage_style") or context.user_data.get("awaiting_custom_bg") or context.user_data.get("awaiting_custom_text"):
         return
 
     raw_text = update.message.text or update.message.caption
@@ -386,7 +627,6 @@ async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYP
 
     success_count = 0
     fail_count = 0
-
     for x_username in unique_usernames:
         try:
             data, filename = await download_hq_avatar(x_username)
@@ -420,7 +660,43 @@ async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
 
 
-# ───────────────── Handlers: Collage conversation ─────────────────
+# ───────────────── Collage conversation ─────────────────
+
+def _bg_keyboard():
+    rows = []
+    keys = list(BG_PRESETS.keys())
+    for i in range(0, len(keys), 2):
+        row = []
+        for k in keys[i : i + 2]:
+            row.append(
+                InlineKeyboardButton(
+                    f"🎨 {BG_PRESETS[k][1]}", callback_data=f"bg:{k}"
+                )
+            )
+        rows.append(row)
+    rows.append(
+        [InlineKeyboardButton("✏️ Custom hex (#RRGGBB)", callback_data="bg:custom")]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+def _text_keyboard():
+    rows = []
+    keys = list(TEXT_PRESETS.keys())
+    for i in range(0, len(keys), 2):
+        row = []
+        for k in keys[i : i + 2]:
+            row.append(
+                InlineKeyboardButton(
+                    f"✏️ {TEXT_PRESETS[k][1]}", callback_data=f"txt:{k}"
+                )
+            )
+        rows.append(row)
+    rows.append(
+        [InlineKeyboardButton("✏️ Custom hex (#RRGGBB)", callback_data="txt:custom")]
+    )
+    return InlineKeyboardMarkup(rows)
+
 
 async def collage_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -429,29 +705,19 @@ async def collage_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _cleanup_session(context)
 
     keyboard = [
-        [
-            InlineKeyboardButton(
-                f"1️⃣ {STYLES['classic']['title']}", callback_data="style:classic"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"2️⃣ {STYLES['tight']['title']}", callback_data="style:tight"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"3️⃣ {STYLES['bordered']['title']}", callback_data="style:bordered"
-            )
-        ],
+        [InlineKeyboardButton(f"1️⃣ {STYLES['classic']['title']}", callback_data="style:classic")],
+        [InlineKeyboardButton(f"2️⃣ {STYLES['tight']['title']}", callback_data="style:tight")],
+        [InlineKeyboardButton(f"3️⃣ {STYLES['bordered']['title']}", callback_data="style:bordered")],
+        [InlineKeyboardButton(f"4️⃣ {STYLES['labeled']['title']}", callback_data="style:labeled")],
     ]
     await update.message.reply_text(
         "🧩 *Collage mode*\n\n"
         "Choose a *grid style*:\n\n"
         f"1️⃣ *{STYLES['classic']['title']}* — {STYLES['classic']['desc']}\n"
         f"2️⃣ *{STYLES['tight']['title']}* — {STYLES['tight']['desc']}\n"
-        f"3️⃣ *{STYLES['bordered']['title']}* — {STYLES['bordered']['desc']}\n\n"
-        f"Then send *{MIN_COLLAGE_PHOTOS}–{MAX_COLLAGE_PHOTOS}* photos, and /done when finished.\n"
+        f"3️⃣ *{STYLES['bordered']['title']}* — {STYLES['bordered']['desc']}\n"
+        f"4️⃣ *{STYLES['labeled']['title']}* — {STYLES['labeled']['desc']}\n\n"
+        f"Photos: *{MIN_COLLAGE_PHOTOS}–{MAX_COLLAGE_PHOTOS}*\n"
         "/cancel to abort.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -475,17 +741,130 @@ async def collage_style_chosen(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("Unknown style. /collage again.")
         return ConversationHandler.END
 
-    _session_dir(context)
     context.user_data["collage_style"] = style_key
-    context.user_data["collage_count"] = 0
-
     s = STYLES[style_key]
+
+    if s.get("kind") == "labeled":
+        await query.edit_message_text(
+            f"✅ Style: *{s['title']}*\n\n"
+            "Now choose *background colour*:",
+            parse_mode="Markdown",
+            reply_markup=_bg_keyboard(),
+        )
+        return BG_SELECT
+
+    _session_dir(context)
+    context.user_data["collage_count"] = 0
     await query.edit_message_text(
         f"✅ Style: *{s['title']}*\n\n"
-        f"Now send me photos ({MIN_COLLAGE_PHOTOS}–{MAX_COLLAGE_PHOTOS}).\n"
-        "You can send many at once.\n\n"
-        "When finished → /done\n"
-        "Cancel → /cancel",
+        f"Send photos ({MIN_COLLAGE_PHOTOS}–{MAX_COLLAGE_PHOTOS}).\n"
+        "When finished → /done\nCancel → /cancel",
+        parse_mode="Markdown",
+    )
+    return COLLECTING
+
+
+async def collage_bg_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    data = query.data or ""
+    if not data.startswith("bg:"):
+        return BG_SELECT
+    key = data.split(":", 1)[1]
+    if key == "custom":
+        context.user_data["awaiting_custom_bg"] = True
+        await query.edit_message_text(
+            "✏️ Send background colour as hex, e.g.\n`#7EC8E3` or `126,200,227`",
+            parse_mode="Markdown",
+        )
+        return BG_SELECT
+
+    if key not in BG_PRESETS:
+        return BG_SELECT
+    context.user_data["collage_bg"] = BG_PRESETS[key][0]
+    await query.edit_message_text(
+        f"✅ Background: *{BG_PRESETS[key][1]}*\n\n"
+        "Now choose *text colour* (labels under icons):",
+        parse_mode="Markdown",
+        reply_markup=_text_keyboard(),
+    )
+    return TEXT_SELECT
+
+
+async def collage_bg_custom_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+    if not context.user_data.get("awaiting_custom_bg"):
+        return BG_SELECT
+    color = _parse_color(update.message.text or "")
+    if not color:
+        await update.message.reply_text("❌ Invalid colour. Try `#7EC8E3`")
+        return BG_SELECT
+    context.user_data["awaiting_custom_bg"] = False
+    context.user_data["collage_bg"] = color
+    await update.message.reply_text(
+        f"✅ Background: `{color}`\n\nNow choose *text colour*:",
+        parse_mode="Markdown",
+        reply_markup=_text_keyboard(),
+    )
+    return TEXT_SELECT
+
+
+async def collage_text_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    data = query.data or ""
+    if not data.startswith("txt:"):
+        return TEXT_SELECT
+    key = data.split(":", 1)[1]
+    if key == "custom":
+        context.user_data["awaiting_custom_text"] = True
+        await query.edit_message_text(
+            "✏️ Send text colour as hex, e.g.\n`#FFFFFF` or `255,255,255`",
+            parse_mode="Markdown",
+        )
+        return TEXT_SELECT
+
+    if key not in TEXT_PRESETS:
+        return TEXT_SELECT
+    context.user_data["collage_text"] = TEXT_PRESETS[key][0]
+    _session_dir(context)
+    context.user_data["collage_count"] = 0
+    await query.edit_message_text(
+        f"✅ Text colour: *{TEXT_PRESETS[key][1]}*\n\n"
+        f"Send icons/photos ({MIN_COLLAGE_PHOTOS}–{MAX_COLLAGE_PHOTOS}).\n\n"
+        "⚠️ *Important:* add *caption* on each photo = label under icon\n"
+        "Example: photo caption `cove` → text “cove” under that icon.\n\n"
+        "When finished → /done\nCancel → /cancel",
+        parse_mode="Markdown",
+    )
+    return COLLECTING
+
+
+async def collage_text_custom_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+    if not context.user_data.get("awaiting_custom_text"):
+        return TEXT_SELECT
+    color = _parse_color(update.message.text or "")
+    if not color:
+        await update.message.reply_text("❌ Invalid colour. Try `#FFFFFF`")
+        return TEXT_SELECT
+    context.user_data["awaiting_custom_text"] = False
+    context.user_data["collage_text"] = color
+    _session_dir(context)
+    context.user_data["collage_count"] = 0
+    await update.message.reply_text(
+        f"✅ Text colour: `{color}`\n\n"
+        f"Send icons/photos ({MIN_COLLAGE_PHOTOS}–{MAX_COLLAGE_PHOTOS}).\n"
+        "Add *caption* on each photo for the label under it.\n\n"
+        "/done when finished · /cancel to abort",
         parse_mode="Markdown",
     )
     return COLLECTING
@@ -501,7 +880,7 @@ async def collage_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok = await _save_incoming_image(update, context)
     if not ok and not (update.message.photo or update.message.document):
         await update.message.reply_text(
-            "Send photos (or image files). When ready: /done"
+            "Send photos (or image files). For Labeled style use captions. /done when ready."
         )
     return COLLECTING
 
@@ -530,9 +909,15 @@ async def collage_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     paths = sorted(Path(session).glob("*.jpg"))
+    labels_map = context.user_data.get("collage_labels") or {}
+    labels = [labels_map.get(p.name, "") for p in paths]
+    bg = context.user_data.get("collage_bg")
+    text_color = context.user_data.get("collage_text")
 
     try:
-        data = await asyncio.to_thread(_build_grid_collage, paths, style_key)
+        data = await asyncio.to_thread(
+            _build_grid_collage, paths, style_key, labels, bg, text_color
+        )
         bio = BytesIO(data)
         bio.seek(0)
         await context.bot.send_photo(
@@ -578,6 +963,14 @@ if __name__ == "__main__":
             STYLE_SELECT: [
                 CallbackQueryHandler(collage_style_chosen, pattern=r"^style:")
             ],
+            BG_SELECT: [
+                CallbackQueryHandler(collage_bg_chosen, pattern=r"^bg:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, collage_bg_custom_text),
+            ],
+            TEXT_SELECT: [
+                CallbackQueryHandler(collage_text_chosen, pattern=r"^txt:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, collage_text_custom_text),
+            ],
             COLLECTING: [
                 MessageHandler(filters.PHOTO, collage_collect),
                 MessageHandler(filters.Document.IMAGE, collage_collect),
@@ -593,7 +986,6 @@ if __name__ == "__main__":
 
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(collage_conv)
-    # PFP text handler — lower priority than conversation
     bot_app.add_handler(
         MessageHandler(
             (filters.TEXT | filters.CAPTION) & ~filters.COMMAND, process_pfp_requests
