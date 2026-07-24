@@ -84,6 +84,19 @@ STYLES = {
         "label_gap": 14,
         "text_color": (255, 255, 255),  # overridable
     },
+    "glide": {
+        "title": "Glide Gallery",
+        "desc": "Centered icons + sleek labels (modern glide style)",
+        "kind": "glide",
+        "gap": 24,
+        "pad": 40,
+        "bg": (35, 35, 50),  # deep elegant default
+        "border": None,
+        "border_w": 0,
+        "radius": 60,
+        "label_gap": 16,
+        "text_color": (255, 255, 255),
+    },
 }
 
 # Color presets for labeled style
@@ -93,6 +106,7 @@ BG_PRESETS = {
     "white": ((255, 255, 255), "White"),
     "dark": ((28, 28, 32), "Dark"),
     "black": ((0, 0, 0), "Black"),
+    "deep": ((35, 35, 50), "Deep Slate"),
     "coral": ((255, 140, 105), "Coral"),
     "mint": ((180, 230, 200), "Mint"),
     "purple": ((120, 90, 180), "Purple"),
@@ -107,6 +121,8 @@ TEXT_PRESETS = {
     "blue": ((40, 100, 255), "Blue"),
     "orange": ((255, 140, 0), "Orange"),
     "gray": ((160, 160, 160), "Gray"),
+    "pink": ((255, 100, 150), "Pink"),
+    "cyan": ((0, 200, 220), "Cyan"),
 }
 
 UA = (
@@ -506,6 +522,166 @@ def _build_labeled_grid(
     return _encode_jpeg(canvas.convert("RGB"))
 
 
+def _build_glide_grid(
+    image_paths: list[Path],
+    labels: list[str],
+    bg: tuple,
+    text_color: tuple,
+) -> bytes:
+    """
+    Glide Gallery: centered spacious layout with large rounded images,
+    sleek text captions underneath, and a modern glass-morphism feel.
+    """
+    n = len(image_paths)
+    if n < MIN_COLLAGE_PHOTOS:
+        raise RuntimeError(f"Need at least {MIN_COLLAGE_PHOTOS} photos")
+
+    style = STYLES["glide"]
+
+    # Determine grid dimensions — prefer wider rows
+    if n <= 2:
+        cols = n
+        rows = 1
+    elif n <= 4:
+        cols = 2
+        rows = math.ceil(n / 2)
+    elif n <= 6:
+        cols = 3
+        rows = math.ceil(n / 3)
+    else:
+        cols = 4
+        rows = math.ceil(n / 4)
+        # if very tall, increase cols
+        while rows > cols + 1 and cols < 8:
+            cols += 1
+            rows = math.ceil(n / cols)
+
+    gap = style["gap"]
+    pad = style["pad"]
+    label_gap = style["label_gap"]
+    radius = min(style["radius"], 80)
+
+    # Slightly larger cells for glide style
+    cell = min(
+        int((MAX_COLLAGE_SIDE - pad * 2 - (cols - 1) * gap) / max(cols, 1)),
+        320,
+    )
+    cell = max(72, cell)
+
+    # Font for captions
+    font_size = max(15, int(cell * 0.15))
+    font = _load_font(font_size)
+    dummy = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    try:
+        bbox = dummy.textbbox((0, 0), "Ag", font=font)
+        text_h = bbox[3] - bbox[1]
+    except Exception:
+        text_h = font_size + 4
+    label_h = text_h + 10
+
+    # If only 1 row, we can center the items horizontally
+    slot_w = cell + gap
+    total_content_w = cols * cell + (cols - 1) * gap
+    slot_h = cell + label_gap + label_h
+    total_content_h = rows * slot_h + (rows - 1) * gap
+
+    canvas_w = pad * 2 + total_content_w
+    canvas_h = max(pad * 2 + total_content_h, int(MAX_COLLAGE_SIDE * 0.6))
+    # If 1 or 2 items, a shorter canvas is fine
+    if n <= 2:
+        canvas_h = pad * 2 + slot_h
+
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (*bg, 255))
+
+    # ── Decorative background ──
+    draw_bg = ImageDraw.Draw(canvas)
+    # Create a subtle gradient effect with overlapping blobs
+    accent_light = tuple(min(255, c + 35) for c in bg[:3])
+    accent_dark = tuple(max(0, c - 35) for c in bg[:3])
+    accent_glow = tuple(min(255, c + 60) for c in bg[:3])
+
+    blobs = [
+        (int(canvas_w * 0.12), int(canvas_h * 0.10), int(canvas_w * 0.35), accent_light),
+        (int(canvas_w * 0.90), int(canvas_h * 0.15), int(canvas_w * 0.25), accent_dark),
+        (int(canvas_w * 0.85), int(canvas_h * 0.85), int(canvas_w * 0.40), accent_light),
+        (int(canvas_w * 0.08), int(canvas_h * 0.80), int(canvas_w * 0.22), accent_glow),
+        (int(canvas_w * 0.50), int(canvas_h * 0.50), int(canvas_w * 0.30), accent_dark),
+    ]
+    for cx, cy, r, col in blobs:
+        draw_bg.ellipse(
+            [cx - r, cy - r, cx + r, cy + r],
+            fill=(*col, 55),
+        )
+
+    # ── Build grid items ──
+    # centering offset if single row
+    x_offset = pad
+    if rows == 1 and n < cols:
+        x_offset = pad + (total_content_w - (n * cell + (n - 1) * gap)) // 2
+
+    for i, path in enumerate(image_paths):
+        row, col = divmod(i, cols)
+        x0 = x_offset + col * (cell + gap)
+        y0 = pad + row * (slot_h + gap)
+
+        # Load & process image
+        try:
+            with Image.open(path) as im:
+                tile = _rounded_square(im, cell, radius)
+        except Exception as e:
+            logging.warning("skip tile %s: %s", path, e)
+            tile = Image.new("RGBA", (cell, cell), (40, 40, 40, 255))
+
+        # ── Glass-morphism shadow layer ──
+        shadow = Image.new("RGBA", (cell + 16, cell + 16), (0, 0, 0, 0))
+        sh_mask = Image.new("L", (cell, cell), 0)
+        ImageDraw.Draw(sh_mask).rounded_rectangle(
+            [0, 0, cell - 1, cell - 1], radius=radius, fill=180
+        )
+        # Two shadow layers for depth
+        sh_layer1 = Image.new("RGBA", (cell, cell), (0, 0, 0, 70))
+        sh_layer1.putalpha(sh_mask)
+        sh_layer2 = Image.new("RGBA", (cell, cell), (0, 0, 0, 35))
+        sh_layer2.putalpha(sh_mask)
+        shadow.paste(sh_layer2, (4, 6), sh_layer2)
+        shadow.paste(sh_layer1, (2, 4), sh_layer1)
+
+        canvas.alpha_composite(shadow, (x0 - 4, y0 - 2))
+        canvas.alpha_composite(tile, (x0, y0))
+
+        # ── Subtle inner glow line ──
+        glow = Image.new("RGBA", (cell, cell), (0, 0, 0, 0))
+        gd = ImageDraw.Draw(glow)
+        gd.rounded_rectangle(
+            [0, 0, cell - 1, cell - 1],
+            radius=radius,
+            outline=(*accent_glow, 60),
+            width=1,
+        )
+        canvas.alpha_composite(glow, (x0, y0))
+
+        # ── Caption text ──
+        label = (labels[i] if i < len(labels) else "") or f"{i + 1}"
+        if len(label) > 24:
+            label = label[:22] + "…"
+
+        draw = ImageDraw.Draw(canvas)
+        try:
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw = bbox[2] - bbox[0]
+        except Exception:
+            tw = len(label) * font_size // 2
+
+        tx = x0 + (cell - tw) // 2
+        ty = y0 + cell + label_gap
+
+        # Text shadow for depth
+        draw.text((tx + 1, ty + 1), label, font=font, fill=(0, 0, 0, 80))
+        draw.text((tx, ty), label, font=font, fill=(*text_color, 255))
+
+    return _encode_jpeg(canvas.convert("RGB"))
+
+
 def _build_grid_collage(
     image_paths: list[Path],
     style_key: str,
@@ -516,6 +692,13 @@ def _build_grid_collage(
     style = STYLES[style_key]
     if style.get("kind") == "labeled":
         return _build_labeled_grid(
+            image_paths,
+            labels or [],
+            bg or style["bg"],
+            text_color or style["text_color"],
+        )
+    if style.get("kind") == "glide":
+        return _build_glide_grid(
             image_paths,
             labels or [],
             bg or style["bg"],
@@ -564,7 +747,7 @@ async def _save_incoming_image(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["collage_count"] = idx
 
     style_key = context.user_data.get("collage_style")
-    if style_key == "labeled":
+    if style_key in ("labeled", "glide"):
         shown = caption if caption else "(no caption — will use number)"
         if idx <= 5 or idx % 10 == 0 or idx == MAX_COLLAGE_PHOTOS:
             await update.message.reply_text(
@@ -709,6 +892,7 @@ async def collage_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f"2️⃣ {STYLES['tight']['title']}", callback_data="style:tight")],
         [InlineKeyboardButton(f"3️⃣ {STYLES['bordered']['title']}", callback_data="style:bordered")],
         [InlineKeyboardButton(f"4️⃣ {STYLES['labeled']['title']}", callback_data="style:labeled")],
+        [InlineKeyboardButton(f"5️⃣ {STYLES['glide']['title']}", callback_data="style:glide")],
     ]
     await update.message.reply_text(
         "🧩 *Collage mode*\n\n"
@@ -716,7 +900,8 @@ async def collage_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"1️⃣ *{STYLES['classic']['title']}* — {STYLES['classic']['desc']}\n"
         f"2️⃣ *{STYLES['tight']['title']}* — {STYLES['tight']['desc']}\n"
         f"3️⃣ *{STYLES['bordered']['title']}* — {STYLES['bordered']['desc']}\n"
-        f"4️⃣ *{STYLES['labeled']['title']}* — {STYLES['labeled']['desc']}\n\n"
+        f"4️⃣ *{STYLES['labeled']['title']}* — {STYLES['labeled']['desc']}\n"
+        f"5️⃣ *{STYLES['glide']['title']}* — {STYLES['glide']['desc']}\n\n"
         f"Photos: *{MIN_COLLAGE_PHOTOS}–{MAX_COLLAGE_PHOTOS}*\n"
         "/cancel to abort.",
         parse_mode="Markdown",
@@ -744,7 +929,7 @@ async def collage_style_chosen(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["collage_style"] = style_key
     s = STYLES[style_key]
 
-    if s.get("kind") == "labeled":
+    if s.get("kind") in ("labeled", "glide"):
         await query.edit_message_text(
             f"✅ Style: *{s['title']}*\n\n"
             "Now choose *background colour*:",
