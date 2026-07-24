@@ -2,6 +2,7 @@ import os
 import logging
 import re
 import asyncio
+import json
 import urllib.request
 from io import BytesIO
 from flask import Flask
@@ -9,14 +10,19 @@ from threading import Thread
 from telegram import Update, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Logging setup
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 
-# Env vars
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_ADMIN_ID = int(os.getenv("TARGET_ADMIN_ID", 0))
 
-# ===== DUMMY WEB SERVER =====
+UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
 flask_app = Flask(__name__)
 
 
@@ -31,67 +37,104 @@ def run_flask():
 
 
 def keep_alive():
-    t = Thread(target=run_flask)
-    t.start()
-# ============================
+    Thread(target=run_flask, daemon=True).start()
 
 
-def _upgrade_twitter_avatar_url(url: str) -> str:
-    """Twitter/X CDN size suffixes ko hata kar original full-size URL banata hai."""
-    for suffix in ("_normal", "_bigger", "_mini", "_200x200", "_400x400", "_x96"):
-        if suffix in url:
-            url = url.replace(suffix, "")
-    return url
+def _http_get(url: str, timeout: int = 45):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": UA,
+            "Accept": "application/json,image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read(), resp.geturl(), (resp.headers.get("Content-Type") or "")
 
 
-def _download_hq_avatar(username: str) -> tuple[bytes, str]:
+def _avatar_variants(avatar_url: str):
+    """Twitter CDN variants. Original (no size suffix) is best quality available."""
+    urls = []
+    if not avatar_url:
+        return urls
+
+    # _normal is only 48x48 (blurry). Strip size suffixes for full original.
+    original = re.sub(
+        r"_(normal|bigger|mini|200x200|400x400|x96)(?=\.[A-Za-z0-9]+$)",
+        "",
+        avatar_url,
+    )
+    if "." in original:
+        four = re.sub(r"(\.[A-Za-z0-9]+)$", r"_400x400\1", original)
+    else:
+        four = original
+
+    for u in (original, four, avatar_url):
+        if u and u not in urls:
+            urls.append(u)
+    return urls
+
+
+def _download_hq_avatar(username: str):
     """
-    High quality avatar download:
-    1) unavatar se large size
-    2) agar twimg URL mile to original (no size suffix) try
+    Real HQ:
+    1) FixTweet API -> real pbs.twimg.com avatar URL
+    2) Strip _normal (48x48) so we get original CDN image
+    3) Pick largest download
+    4) unavatar only as last fallback (often low quality)
     """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-    }
+    candidates = []
 
-    # size=4096 => max quality from unavatar
-    source_url = f"https://unavatar.io/x/{username}?size=4096"
-    req = urllib.request.Request(source_url, headers=headers)
-    with urllib.request.urlopen(req, timeout=45) as resp:
-        data = resp.read()
-        final_url = resp.geturl()
-        content_type = resp.headers.get("Content-Type", "image/jpeg") or "image/jpeg"
+    try:
+        raw, _, _ = _http_get(f"https://api.fxtwitter.com/{username}")
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+        avatar_url = (payload.get("user") or {}).get("avatar_url") or ""
+        logging.info("@%s fxtwitter avatar_url=%s", username, avatar_url)
 
-    # Upgrade to original Twitter CDN asset when possible
-    upgraded = _upgrade_twitter_avatar_url(final_url)
-    if upgraded != final_url:
-        try:
-            req2 = urllib.request.Request(upgraded, headers=headers)
-            with urllib.request.urlopen(req2, timeout=45) as resp2:
-                upgraded_data = resp2.read()
-                if len(upgraded_data) >= len(data):
-                    data = upgraded_data
-                    final_url = upgraded
-                    content_type = resp2.headers.get("Content-Type", content_type) or content_type
-        except Exception as e:
-            logging.info("Original-size upgrade skipped for @%s: %s", username, e)
+        for url in _avatar_variants(avatar_url):
+            try:
+                data, final, ctype = _http_get(url)
+                if not data or len(data) < 500:
+                    continue
+                if "html" in ctype.lower() or data[:1] in (b"<", b"{"):
+                    continue
+                candidates.append((len(data), data, final))
+                logging.info("@%s candidate %s bytes <- %s", username, len(data), final)
+            except Exception as e:
+                logging.info("@%s variant fail %s: %s", username, url, e)
+    except Exception as e:
+        logging.warning("@%s fxtwitter failed: %s", username, e)
+
+    if not candidates:
+        for u in (
+            f"https://unavatar.io/x/{username}?size=4096",
+            f"https://unavatar.io/twitter/{username}?size=4096",
+        ):
+            try:
+                data, final, ctype = _http_get(u)
+                if data and len(data) >= 500 and "html" not in ctype.lower():
+                    candidates.append((len(data), data, final))
+            except Exception as e:
+                logging.info("@%s unavatar fail %s: %s", username, u, e)
+
+    if not candidates:
+        raise RuntimeError(f"No avatar found for @{username}")
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    size, data, final = candidates[0]
+    logging.info("@%s CHOSE %s bytes from %s", username, size, final)
 
     ext = "jpg"
-    ct = content_type.lower()
-    low = final_url.lower()
-    if "png" in ct or low.endswith(".png"):
+    low = (final or "").lower()
+    if low.endswith(".png") or data[:8].startswith(b"\x89PNG"):
         ext = "png"
-    elif "webp" in ct or low.endswith(".webp"):
+    elif low.endswith(".webp") or data[:4] == b"RIFF":
         ext = "webp"
-    elif "jpeg" in ct or "jpg" in ct or low.endswith(".jpg") or low.endswith(".jpeg"):
-        ext = "jpg"
 
-    return data, f"{username}.{ext}"
+    return data, f"{username}_hq.{ext}"
 
 
-async def download_hq_avatar(username: str) -> tuple[bytes, str]:
+async def download_hq_avatar(username: str):
     return await asyncio.to_thread(_download_hq_avatar, username)
 
 
@@ -112,7 +155,6 @@ async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     usernames_found = []
-
     for word in raw_text.split():
         link_match = re.search(
             r"https?://(?:www\.)?(?:x|twitter)\.com/([a-zA-Z0-9_]+)", word
@@ -138,10 +180,12 @@ async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYP
     for x_username in unique_usernames:
         try:
             data, filename = await download_hq_avatar(x_username)
-            # send_document = no Telegram compression (full quality file)
+            bio = BytesIO(data)
+            bio.seek(0)
+            # send_document keeps original file quality (no Telegram photo compression)
             await context.bot.send_document(
                 chat_id=TARGET_ADMIN_ID,
-                document=InputFile(BytesIO(data), filename=filename),
+                document=InputFile(bio, filename=filename),
             )
             success_count += 1
         except Exception as e:
@@ -184,4 +228,4 @@ if __name__ == "__main__":
     )
 
     print("Scraper Bot is running smoothly...")
-    bot_app.run_polling()
+    bot_app.run_polling(drop_pending_updates=True)
