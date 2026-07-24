@@ -868,7 +868,7 @@ async def _save_incoming_image(update: Update, context: ContextTypes.DEFAULT_TYP
     return True
 
 
-# ───────────────── Handlers: PFP ─────────────────
+# ───────────────── Handlers: Commands & PFP ─────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -877,7 +877,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *Commands*\n"
         "• Send X profile link / @username → HQ PFP photo\n"
         "• /collage → grid collage (5 styles, including App Showcase)\n"
-        "• /cancel → cancel collage session",
+        "• /cancel → cancel collage session\n"
+        "• /help → view commands list",
+        parse_mode="Markdown",
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    await update.message.reply_text(
+        "🛠 *Bot Help Menu*\n\n"
+        "• *X PFP Scraper:* Send any text containing a Twitter/X username or link to get their HQ profile picture.\n"
+        "• */collage:* Start the collage builder. Supports 6 styles including the new App Showcase.\n"
+        "• */cancel:* Stop the current action or collage builder.\n"
+        "• */done:* Generate the collage once you've sent all photos.",
         parse_mode="Markdown",
     )
 
@@ -1275,7 +1289,9 @@ if __name__ == "__main__":
         allow_reentry=True,
     )
 
+    # ───────────────── Register Commands Here ─────────────────
     bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CommandHandler("help", help_command)) # Naya command yahan add kiya hai
     bot_app.add_handler(collage_conv)
     bot_app.add_handler(
         MessageHandler(
