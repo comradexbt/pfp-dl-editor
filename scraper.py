@@ -97,6 +97,19 @@ STYLES = {
         "label_gap": 16,
         "text_color": (255, 255, 255),
     },
+    "app_style": {
+        "title": "App Showcase (New)",
+        "desc": "Centered icons with dark app border & text below",
+        "kind": "app_style",
+        "gap": 35,
+        "pad": 60,
+        "bg": (126, 200, 227),
+        "border": None,
+        "border_w": 0,
+        "radius": 45,
+        "label_gap": 15,
+        "text_color": (255, 255, 255),
+    },
 }
 
 # Color presets for labeled style
@@ -420,12 +433,10 @@ def _build_labeled_grid(
 
     style = STYLES["labeled"]
     cols = math.ceil(math.sqrt(n))
-    # Prefer wider grids for labeled (like 4-col app rows when possible)
     if n >= 4:
         cols = min(cols + (0 if n <= 9 else 1), max(4, cols))
         cols = min(cols, 8)
         rows = math.ceil(n / cols)
-        # rebalance if too tall
         while rows > cols + 1 and cols < 10:
             cols += 1
             rows = math.ceil(n / cols)
@@ -435,15 +446,8 @@ def _build_labeled_grid(
     gap = style["gap"]
     pad = style["pad"]
     label_gap = style["label_gap"]
-    radius_ratio = 0.22  # rounded like reference icons
+    radius_ratio = 0.22 
 
-    # Reserve space under each tile for label
-    # Estimate font ~14% of cell
-    # total height ~ pad*2 + rows*(cell + label_h + label_gap) + (rows-1)*gap
-    # total width ~ pad*2 + cols*cell + (cols-1)*gap
-    # Fit in MAX_COLLAGE_SIDE
-    # label_h ≈ cell * 0.22
-    # cell * rows * 1.22 + gaps + pad <= MAX
     rows_factor = rows * 1.28
     cols_factor = cols
     cell_by_h = int((MAX_COLLAGE_SIDE - pad * 2 - max(0, rows - 1) * gap) / max(rows_factor, 0.01))
@@ -452,7 +456,6 @@ def _build_labeled_grid(
 
     font_size = max(14, int(cell * 0.16))
     font = _load_font(font_size)
-    # measure label height with a sample
     dummy = ImageDraw.Draw(Image.new("RGB", (10, 10)))
     try:
         bbox = dummy.textbbox((0, 0), "Ay", font=font)
@@ -466,7 +469,6 @@ def _build_labeled_grid(
     canvas_h = pad * 2 + rows * slot_h + max(0, rows - 1) * gap
     canvas = Image.new("RGBA", (canvas_w, canvas_h), (*bg, 255))
 
-    # subtle decorative blobs (like reference) — soft circles
     draw_bg = ImageDraw.Draw(canvas)
     accent = tuple(min(255, c + 30) for c in bg[:3])
     accent2 = tuple(max(0, c - 40) for c in bg[:3])
@@ -492,7 +494,6 @@ def _build_labeled_grid(
             logging.warning("skip tile %s: %s", path, e)
             tile = Image.new("RGBA", (cell, cell), (40, 40, 40, 255))
 
-        # soft drop shadow
         shadow = Image.new("RGBA", (cell + 12, cell + 12), (0, 0, 0, 0))
         sh_mask = Image.new("L", (cell, cell), 0)
         ImageDraw.Draw(sh_mask).rounded_rectangle(
@@ -505,7 +506,6 @@ def _build_labeled_grid(
         canvas.alpha_composite(tile, (x0, y0))
 
         label = (labels[i] if i < len(labels) else "") or f"{i + 1}"
-        # truncate long labels
         if len(label) > 22:
             label = label[:20] + "…"
 
@@ -528,17 +528,12 @@ def _build_glide_grid(
     bg: tuple,
     text_color: tuple,
 ) -> bytes:
-    """
-    Glide Gallery: centered spacious layout with large rounded images,
-    sleek text captions underneath, and a modern glass-morphism feel.
-    """
     n = len(image_paths)
     if n < MIN_COLLAGE_PHOTOS:
         raise RuntimeError(f"Need at least {MIN_COLLAGE_PHOTOS} photos")
 
     style = STYLES["glide"]
 
-    # Determine grid dimensions — prefer wider rows
     if n <= 2:
         cols = n
         rows = 1
@@ -551,7 +546,6 @@ def _build_glide_grid(
     else:
         cols = 4
         rows = math.ceil(n / 4)
-        # if very tall, increase cols
         while rows > cols + 1 and cols < 8:
             cols += 1
             rows = math.ceil(n / cols)
@@ -561,14 +555,12 @@ def _build_glide_grid(
     label_gap = style["label_gap"]
     radius = min(style["radius"], 80)
 
-    # Slightly larger cells for glide style
     cell = min(
         int((MAX_COLLAGE_SIDE - pad * 2 - (cols - 1) * gap) / max(cols, 1)),
         320,
     )
     cell = max(72, cell)
 
-    # Font for captions
     font_size = max(15, int(cell * 0.15))
     font = _load_font(font_size)
     dummy = ImageDraw.Draw(Image.new("RGB", (10, 10)))
@@ -579,7 +571,6 @@ def _build_glide_grid(
         text_h = font_size + 4
     label_h = text_h + 10
 
-    # If only 1 row, we can center the items horizontally
     slot_w = cell + gap
     total_content_w = cols * cell + (cols - 1) * gap
     slot_h = cell + label_gap + label_h
@@ -587,15 +578,12 @@ def _build_glide_grid(
 
     canvas_w = pad * 2 + total_content_w
     canvas_h = max(pad * 2 + total_content_h, int(MAX_COLLAGE_SIDE * 0.6))
-    # If 1 or 2 items, a shorter canvas is fine
     if n <= 2:
         canvas_h = pad * 2 + slot_h
 
     canvas = Image.new("RGBA", (canvas_w, canvas_h), (*bg, 255))
 
-    # ── Decorative background ──
     draw_bg = ImageDraw.Draw(canvas)
-    # Create a subtle gradient effect with overlapping blobs
     accent_light = tuple(min(255, c + 35) for c in bg[:3])
     accent_dark = tuple(max(0, c - 35) for c in bg[:3])
     accent_glow = tuple(min(255, c + 60) for c in bg[:3])
@@ -613,8 +601,6 @@ def _build_glide_grid(
             fill=(*col, 55),
         )
 
-    # ── Build grid items ──
-    # centering offset if single row
     x_offset = pad
     if rows == 1 and n < cols:
         x_offset = pad + (total_content_w - (n * cell + (n - 1) * gap)) // 2
@@ -624,7 +610,6 @@ def _build_glide_grid(
         x0 = x_offset + col * (cell + gap)
         y0 = pad + row * (slot_h + gap)
 
-        # Load & process image
         try:
             with Image.open(path) as im:
                 tile = _rounded_square(im, cell, radius)
@@ -632,13 +617,11 @@ def _build_glide_grid(
             logging.warning("skip tile %s: %s", path, e)
             tile = Image.new("RGBA", (cell, cell), (40, 40, 40, 255))
 
-        # ── Glass-morphism shadow layer ──
         shadow = Image.new("RGBA", (cell + 16, cell + 16), (0, 0, 0, 0))
         sh_mask = Image.new("L", (cell, cell), 0)
         ImageDraw.Draw(sh_mask).rounded_rectangle(
             [0, 0, cell - 1, cell - 1], radius=radius, fill=180
         )
-        # Two shadow layers for depth
         sh_layer1 = Image.new("RGBA", (cell, cell), (0, 0, 0, 70))
         sh_layer1.putalpha(sh_mask)
         sh_layer2 = Image.new("RGBA", (cell, cell), (0, 0, 0, 35))
@@ -649,7 +632,6 @@ def _build_glide_grid(
         canvas.alpha_composite(shadow, (x0 - 4, y0 - 2))
         canvas.alpha_composite(tile, (x0, y0))
 
-        # ── Subtle inner glow line ──
         glow = Image.new("RGBA", (cell, cell), (0, 0, 0, 0))
         gd = ImageDraw.Draw(glow)
         gd.rounded_rectangle(
@@ -660,7 +642,6 @@ def _build_glide_grid(
         )
         canvas.alpha_composite(glow, (x0, y0))
 
-        # ── Caption text ──
         label = (labels[i] if i < len(labels) else "") or f"{i + 1}"
         if len(label) > 24:
             label = label[:22] + "…"
@@ -675,8 +656,125 @@ def _build_glide_grid(
         tx = x0 + (cell - tw) // 2
         ty = y0 + cell + label_gap
 
-        # Text shadow for depth
         draw.text((tx + 1, ty + 1), label, font=font, fill=(0, 0, 0, 80))
+        draw.text((tx, ty), label, font=font, fill=(*text_color, 255))
+
+    return _encode_jpeg(canvas.convert("RGB"))
+
+
+def _build_app_style_grid(
+    image_paths: list[Path],
+    labels: list[str],
+    bg: tuple,
+    text_color: tuple,
+) -> bytes:
+    """New App Showcase Style matching the reference image completely."""
+    n = len(image_paths)
+    if n < MIN_COLLAGE_PHOTOS:
+        raise RuntimeError(f"Need at least {MIN_COLLAGE_PHOTOS} photos")
+
+    style = STYLES["app_style"]
+    
+    # 4 columns max for app layout just like the reference picture
+    cols = min(4, n) if n <= 4 else (4 if n <= 8 else math.ceil(math.sqrt(n)))
+    if n > 8 and cols < 4: 
+        cols = 4
+    rows = math.ceil(n / cols)
+
+    pad = style["pad"]
+    gap = style["gap"]
+    label_gap = style["label_gap"]
+    
+    cell = min(260, int((MAX_COLLAGE_SIDE - pad * 2 - (cols - 1) * gap) / cols))
+    radius = int(cell * 0.25)  # Squircle shape like standard apps
+
+    font_size = max(18, int(cell * 0.16))
+    font = _load_font(font_size)
+    try:
+        dummy = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+        bbox = dummy.textbbox((0, 0), "Ag", font=font)
+        label_h = bbox[3] - bbox[1] + 10
+    except:
+        label_h = font_size + 10
+
+    slot_w = cell
+    slot_h = cell + label_gap + label_h
+
+    total_w = cols * slot_w + (cols - 1) * gap
+    total_h = rows * slot_h + (rows - 1) * gap
+
+    canvas_w = pad * 2 + total_w
+    canvas_h = pad * 2 + total_h
+
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (*bg, 255))
+    draw = ImageDraw.Draw(canvas)
+
+    # Decorative Blobs matching the reference style (Warm complementary colors)
+    c_orange = (235, 90, 50, 180)
+    c_red = (210, 40, 40, 180)
+    
+    # Top-left blob
+    draw.ellipse([-canvas_w * 0.05, -canvas_h * 0.05, canvas_w * 0.15, canvas_h * 0.15], fill=c_orange)
+    # Top-right blob
+    draw.ellipse([canvas_w * 0.85, -canvas_h * 0.1, canvas_w * 1.1, canvas_h * 0.15], fill=c_red)
+    # Bottom-left blob
+    draw.ellipse([-canvas_w * 0.1, canvas_h * 0.8, canvas_w * 0.15, canvas_h * 1.1], fill=c_red)
+    # Bottom-right blob
+    draw.ellipse([canvas_w * 0.8, canvas_h * 0.85, canvas_w * 1.05, canvas_h * 1.05], fill=c_orange)
+    # Floating small dots
+    draw.ellipse([canvas_w * 0.15, canvas_h * 0.2, canvas_w * 0.15 + 25, canvas_h * 0.2 + 25], fill=c_orange)
+    draw.ellipse([canvas_w * 0.82, canvas_h * 0.75, canvas_w * 0.82 + 30, canvas_h * 0.75 + 30], fill=c_orange)
+
+    # Border Settings for the Apps
+    border_w = max(4, int(cell * 0.05))
+    border_color = (15, 15, 25, 255) # Dark black/navy border like the reference
+
+    for i, path in enumerate(image_paths):
+        row, col = divmod(i, cols)
+        
+        # Center bottom row if not full
+        items_in_this_row = n - row * cols
+        if items_in_this_row < cols and row == rows - 1:
+            row_w = items_in_this_row * slot_w + (items_in_this_row - 1) * gap
+            x0 = pad + (total_w - row_w) // 2 + col * (slot_w + gap)
+        else:
+            x0 = pad + col * (slot_w + gap)
+
+        y0 = pad + row * (slot_h + gap)
+
+        try:
+            with Image.open(path) as im:
+                tile = _rounded_square(im, cell, radius)
+        except Exception as e:
+            logging.warning("skip tile %s: %s", path, e)
+            tile = Image.new("RGBA", (cell, cell), (40, 40, 40, 255))
+
+        # Draw outer dark app border FIRST
+        draw.rounded_rectangle(
+            [x0 - border_w, y0 - border_w, x0 + cell + border_w, y0 + cell + border_w],
+            radius=radius + border_w,
+            fill=border_color
+        )
+
+        # Paste the Image inside
+        canvas.alpha_composite(tile, (x0, y0))
+
+        # Adding the Label (Text)
+        label = (labels[i] if i < len(labels) else "") or f"{i + 1}"
+        if len(label) > 20: 
+            label = label[:18] + "…"
+
+        try:
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw = bbox[2] - bbox[0]
+        except:
+            tw = len(label) * font_size // 2
+
+        tx = x0 + (cell - tw) // 2
+        ty = y0 + cell + label_gap
+
+        # Optional subtle text shadow for better readability
+        draw.text((tx + 1, ty + 1), label, font=font, fill=(0, 0, 0, 90))
         draw.text((tx, ty), label, font=font, fill=(*text_color, 255))
 
     return _encode_jpeg(canvas.convert("RGB"))
@@ -699,6 +797,13 @@ def _build_grid_collage(
         )
     if style.get("kind") == "glide":
         return _build_glide_grid(
+            image_paths,
+            labels or [],
+            bg or style["bg"],
+            text_color or style["text_color"],
+        )
+    if style.get("kind") == "app_style":
+        return _build_app_style_grid(
             image_paths,
             labels or [],
             bg or style["bg"],
@@ -733,7 +838,6 @@ async def _save_incoming_image(update: Update, context: ContextTypes.DEFAULT_TYP
     fname = f"{idx:04d}.jpg"
     path = session / fname
 
-    # Label = photo caption (for labeled style)
     caption = (update.message.caption or "").strip()
     labels = context.user_data.setdefault("collage_labels", {})
     labels[fname] = caption
@@ -747,7 +851,7 @@ async def _save_incoming_image(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["collage_count"] = idx
 
     style_key = context.user_data.get("collage_style")
-    if style_key in ("labeled", "glide"):
+    if style_key in ("labeled", "glide", "app_style"):
         shown = caption if caption else "(no caption — will use number)"
         if idx <= 5 or idx % 10 == 0 or idx == MAX_COLLAGE_PHOTOS:
             await update.message.reply_text(
@@ -772,7 +876,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Commands*\n"
         "• Send X profile link / @username → HQ PFP photo\n"
-        "• /collage → grid collage (4 styles, including labeled)\n"
+        "• /collage → grid collage (5 styles, including App Showcase)\n"
         "• /cancel → cancel collage session",
         parse_mode="Markdown",
     )
@@ -893,6 +997,7 @@ async def collage_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f"3️⃣ {STYLES['bordered']['title']}", callback_data="style:bordered")],
         [InlineKeyboardButton(f"4️⃣ {STYLES['labeled']['title']}", callback_data="style:labeled")],
         [InlineKeyboardButton(f"5️⃣ {STYLES['glide']['title']}", callback_data="style:glide")],
+        [InlineKeyboardButton(f"6️⃣ {STYLES['app_style']['title']}", callback_data="style:app_style")],
     ]
     await update.message.reply_text(
         "🧩 *Collage mode*\n\n"
@@ -901,7 +1006,8 @@ async def collage_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"2️⃣ *{STYLES['tight']['title']}* — {STYLES['tight']['desc']}\n"
         f"3️⃣ *{STYLES['bordered']['title']}* — {STYLES['bordered']['desc']}\n"
         f"4️⃣ *{STYLES['labeled']['title']}* — {STYLES['labeled']['desc']}\n"
-        f"5️⃣ *{STYLES['glide']['title']}* — {STYLES['glide']['desc']}\n\n"
+        f"5️⃣ *{STYLES['glide']['title']}* — {STYLES['glide']['desc']}\n"
+        f"6️⃣ *{STYLES['app_style']['title']}* — {STYLES['app_style']['desc']}\n\n"
         f"Photos: *{MIN_COLLAGE_PHOTOS}–{MAX_COLLAGE_PHOTOS}*\n"
         "/cancel to abort.",
         parse_mode="Markdown",
@@ -929,7 +1035,7 @@ async def collage_style_chosen(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["collage_style"] = style_key
     s = STYLES[style_key]
 
-    if s.get("kind") in ("labeled", "glide"):
+    if s.get("kind") in ("labeled", "glide", "app_style"):
         await query.edit_message_text(
             f"✅ Style: *{s['title']}*\n\n"
             "Now choose *background colour*:",
