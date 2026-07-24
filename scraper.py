@@ -252,9 +252,10 @@ async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYP
             data, filename = await download_hq_avatar(x_username)
             bio = BytesIO(data)
             bio.seek(0)
-            await context.bot.send_document(
+            # HD photo (not file/document) — Telegram photo bubble
+            await context.bot.send_photo(
                 chat_id=TARGET_ADMIN_ID,
-                document=InputFile(bio, filename=filename),
+                photo=InputFile(bio, filename=filename),
             )
             success_count += 1
         except Exception as e:
