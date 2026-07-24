@@ -10,9 +10,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 # Logging setup
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Aap ke naye bot ki details
-BOT_TOKEN = "8585014628:AAHrW6o4dlKHfkoIFHVfKzWsM0a24fCk4s0"
-TARGET_ADMIN_ID = 7323039280  
+# Aap ke naye bot ki details - Ab yeh environment variables se aayengi
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Environment variable string hoti hai, isliye isay int() mein convert kiya hai
+TARGET_ADMIN_ID = int(os.getenv("TARGET_ADMIN_ID", 0))  
 
 # ===== DUMMY WEB SERVER =====
 flask_app = Flask(__name__)
@@ -92,6 +93,11 @@ async def process_pfp_requests(update: Update, context: ContextTypes.DEFAULT_TYP
 if __name__ == '__main__':
     keep_alive()
     
+    # Check if variables are set
+    if not BOT_TOKEN or TARGET_ADMIN_ID == 0:
+        print("ERROR: BOT_TOKEN or TARGET_ADMIN_ID is not set in environment variables.")
+        exit(1)
+        
     bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     
