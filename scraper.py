@@ -1024,12 +1024,13 @@ async def collage_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _cleanup_session(context)
     return ConversationHandler.END
 
-if __name__ == "__main__":
-    keep_alive()
-
+def start_bot():
+    """Start the Telegram bot (polling). Safe to call from __main__ OR when
+    this module is imported by gunicorn/PandaStack (Flask auto-detect).
+    Returns True if the bot started, False if env vars are missing."""
     if not BOT_TOKEN or TARGET_ADMIN_ID == 0:
         print("ERROR: BOT_TOKEN or TARGET_ADMIN_ID is not set in environment variables.")
-        exit(1)
+        return False
 
     bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -1064,3 +1065,16 @@ if __name__ == "__main__":
 
     print("Scraper Bot is running smoothly...")
     bot_app.run_polling(drop_pending_updates=True)
+    return True
+
+
+if __name__ == "__main__":
+    # Direct run: `python scraper.py` — Flask keep-alive in a thread, bot in main thread.
+    keep_alive()
+    if not start_bot():
+        exit(1)
+elif os.environ.get("BOT_AUTOSTART", "1") == "1":
+    # Imported by gunicorn/PandaStack (Flask auto-detect): __main__ never runs,
+    # so start the bot in a background thread. gunicorn serves the Flask app.
+    # Set BOT_AUTOSTART=0 to disable (e.g. multiple gunicorn workers).
+    Thread(target=start_bot, daemon=True).start()
